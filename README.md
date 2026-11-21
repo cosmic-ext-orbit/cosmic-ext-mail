@@ -6,13 +6,6 @@ The first build may compile SpiderMonkey from source, which requires LLVM
 tools on `PATH`. If your distro installs them under a versioned directory,
 prepend that directory to `PATH` before running Cargo.
 
-Create an `EmailView` once on the UI thread. Pass it `EmailBody::Mime` for
-raw `.eml` bytes, or use `EmailBody::Html` and `EmailBody::PlainText` for
-decoded bodies. Render it with `view()`, include `subscription()` in the
-host application's subscriptions, and call `set_body()` when the selection
-changes. The pane renders the message body and supported inline images.
-The host application supplies headers and attachment controls.
-
 ## Installation
 
 A [justfile](./justfile) is included by default for the [casey/just][just] command runner.
