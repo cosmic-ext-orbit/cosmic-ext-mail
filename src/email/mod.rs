@@ -1,0 +1,121 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
+mod body;
+mod document;
+mod pane;
+mod runtime;
+
+pub use body::EmailBody;
+use cosmic::iced::advanced::image::{self, Renderer as _};
+use cosmic::iced::{Rectangle, Subscription};
+use cosmic::{Element, Renderer};
+use document::Delegate;
+use pane::Pane;
+use runtime::Runtime;
+use servo::{
+    DeviceIntPoint, DeviceIntRect, DeviceIntSize, RenderingContext, SoftwareRenderingContext,
+    WebView, WebViewBuilder,
+};
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
+
+/// A live, read-only COSMIC pane for HTML, plain text, or raw MIME email.
+pub struct EmailView {
+    webview: WebView,
+    runtime: Rc<Runtime>,
+    context: Rc<SoftwareRenderingContext>,
+    delegate: Rc<Delegate>,
+    frame: RefCell<Option<image::Allocation>>,
+    scale: Cell<f32>,
+    focused: Cell<bool>,
+    dragging: Cell<bool>,
+}
+
+impl EmailView {
+    /// Creates a pane on the COSMIC application's UI thread. Panes share one Servo runtime.
+    pub fn new(body: EmailBody<'_>) -> Result<Self, String> {
+        let html = body.into_html()?;
+        let context = Rc::new(
+            SoftwareRenderingContext::new((640_u32, 420_u32).into()).map_err(|error| {
+                format!("Could not create Servo's rendering context: {error:?}")
+            })?,
+        );
+        context
+            .make_current()
+            .map_err(|error| format!("{error:?}"))?;
+        let runtime = Runtime::shared();
+        let url = runtime.message_url();
+        let delegate = Rc::new(Delegate::new(url.clone(), html));
+        let webview = WebViewBuilder::new(&runtime.servo, context.clone())
+            .url(url)
+            .delegate(delegate.clone())
+            .clipboard_delegate(delegate.clone())
+            .build();
+        webview.show();
+
+        Ok(Self {
+            webview,
+            runtime,
+            context,
+            delegate,
+            frame: RefCell::new(None),
+            scale: Cell::new(1.0),
+            focused: Cell::new(false),
+            dragging: Cell::new(false),
+        })
+    }
+
+    /// Replaces the content without restarting Servo. Parse failures leave the current message intact.
+    pub fn set_body(&mut self, body: EmailBody<'_>) -> Result<(), String> {
+        let html = body.into_html()?;
+        let url = self.runtime.message_url();
+        self.delegate.replace_document(url.clone(), html);
+        self.frame.get_mut().take();
+        self.dragging.set(false);
+        self.webview.load(url);
+        self.runtime.wake();
+        Ok(())
+    }
+
+    pub fn view<Message>(&self) -> Element<'_, Message> {
+        Element::new(Pane(self))
+    }
+
+    /// Map this wake subscription into the host application's message type.
+    pub fn subscription(&self) -> Subscription<()> {
+        self.runtime.subscription()
+    }
+
+    fn update_frame(&self, bounds: Rectangle, renderer: &Renderer) {
+        let scale = self.scale.get();
+        self.webview
+            .set_hidpi_scale_factor(euclid::Scale::new(scale));
+        let width = (bounds.width * scale).round().max(1.0) as u32;
+        let height = (bounds.height * scale).round().max(1.0) as u32;
+        let size = (width, height).into();
+        if size != self.context.size() {
+            self.delegate.frame_ready.set(false);
+            self.webview.resize(size);
+        }
+
+        self.runtime.servo.spin_event_loop();
+        if self.delegate.frame_ready.replace(false) {
+            if !self.delegate.document_is_ready(&self.webview) {
+                return;
+            }
+            self.webview.paint();
+            let rect = DeviceIntRect::from_origin_and_size(
+                DeviceIntPoint::zero(),
+                DeviceIntSize::new(width as i32, height as i32),
+            );
+            if let Some(frame) = self.context.read_to_image(rect) {
+                let handle =
+                    image::Handle::from_rgba(frame.width(), frame.height(), frame.into_raw());
+                // Iced may skip drawing an image until its upload finishes.
+                if let Ok(allocation) = renderer.load_image(&handle) {
+                    *self.frame.borrow_mut() = Some(allocation);
+                }
+            }
+        }
+    }
+}
