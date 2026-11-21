@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use crate::fl;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -42,7 +43,7 @@ impl Folder {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MailId {
     pub account: Uuid,
     pub folder: String,
@@ -50,7 +51,7 @@ pub struct MailId {
     pub uid: u32,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Mail {
     pub id: MailId,
     pub account_email: String,
@@ -64,9 +65,11 @@ pub struct Mail {
 
 impl Mail {
     pub fn matches(&self, query: &str) -> bool {
+        let mut words = query.split_whitespace().peekable();
+        if words.peek().is_none() {
+            return true;
+        }
         let text = format!("{} {} {}", self.sender, self.address, self.subject).to_lowercase();
-        query
-            .split_whitespace()
-            .all(|word| text.contains(&word.to_lowercase()))
+        words.all(|word| text.contains(&word.to_lowercase()))
     }
 }

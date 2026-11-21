@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-use super::{Folder, Mailbox, Status, message_row_id, remote};
+use super::{Downloads, Folder, Mailbox, Status, VISIBLE_MESSAGE_LIMIT, message_row_id, remote};
 use crate::fl;
 use cosmic::iced::Length;
 use cosmic::{Element, widget};
@@ -14,12 +14,16 @@ pub enum ListMessage {
     ResumeDraft,
     Refresh,
     AddAccount,
+    Cached(u64, Option<remote::FolderContents>),
     Loaded(u64, remote::FolderContents),
+    Download(u64, Option<remote::DownloadEvent>),
 }
 
 impl Mailbox {
     pub fn view<'a>(&'a self, query: &'a str, has_draft: bool) -> Element<'a, ListMessage> {
-        let mut rows = widget::column::with_capacity(self.contents.messages.len()).spacing(4);
+        let mut rows =
+            widget::column::with_capacity(self.contents.messages.len().min(VISIBLE_MESSAGE_LIMIT))
+                .spacing(4);
         if self.folder == Folder::Drafts && has_draft {
             rows = rows.push(
                 widget::button::standard(fl!("resume-draft")).on_press(ListMessage::ResumeDraft),
@@ -41,8 +45,8 @@ impl Mailbox {
                         error = error.text()
                     )));
                 }
-                let mut visible = self.visible_messages(query).peekable();
-                if visible.peek().is_none()
+                let mut matches = self.matching_messages(query).peekable();
+                if matches.peek().is_none()
                     && self.contents.failures.is_empty()
                     && !(self.folder == Folder::Drafts && has_draft)
                 {
@@ -53,7 +57,7 @@ impl Mailbox {
                     };
                     rows = rows.push(widget::text::body(empty));
                 }
-                for (id, mail) in visible {
+                for (id, mail) in matches.by_ref().take(VISIBLE_MESSAGE_LIMIT) {
                     let sender = if mail.unread {
                         format!("• {}", mail.sender)
                     } else {
@@ -82,22 +86,35 @@ impl Mailbox {
                             .on_press(ListMessage::Select(id)),
                     );
                 }
-                if self.contents.limited {
+                if matches.peek().is_some() {
                     rows = rows.push(widget::text::caption(fl!(
-                        "mail-list-limit",
-                        count = remote::PAGE_SIZE
+                        "mail-visible-limit",
+                        count = VISIBLE_MESSAGE_LIMIT
                     )));
                 }
             }
         }
         let header = widget::row::with_capacity(2)
             .push(widget::text::title3(self.folder.label()).width(Length::Fill))
-            .push(widget::button::text(fl!("mail-refresh")).on_press_maybe(
-                matches!(self.status, Status::Loaded).then_some(ListMessage::Refresh),
-            ))
+            .push(
+                widget::button::text(fl!("mail-refresh")).on_press_maybe(
+                    (!self.syncing && matches!(self.status, Status::Loaded))
+                        .then_some(ListMessage::Refresh),
+                ),
+            )
             .align_y(cosmic::iced::Alignment::Center);
-        let content = widget::column::with_capacity(2)
-            .push(header)
+        let mut content = widget::column::with_capacity(4).push(header);
+        if self.downloads.active > 0 {
+            let Downloads { saved, total, .. } = self.downloads;
+            content = content
+                .push(widget::text::caption(fl!(
+                    "mail-download-progress",
+                    saved = saved,
+                    total = total
+                )))
+                .push(widget::determinate_linear(saved as f32 / total as f32).width(Length::Fill));
+        }
+        let content = content
             .push(
                 widget::scrollable(rows)
                     .id(self.list_id.clone())

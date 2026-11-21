@@ -9,7 +9,7 @@ use crate::fl;
 use cosmic::Task;
 use uuid::Uuid;
 
-pub(super) use connection::with_imap;
+pub(super) use connection::{with_imap, with_imap_session};
 use model::Form;
 pub use model::{Account, Field, Password};
 use store::Store;

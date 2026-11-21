@@ -255,9 +255,22 @@ impl AppModel {
                     .update(accounts::Message::Add)
                     .map(|message| Message::Accounts(message).into());
             }
+            ListMessage::Download(request, event) => self.mailbox.update_download(request, event),
+            ListMessage::Cached(request, contents) => {
+                if self.mailbox.finish_load(request, contents, false).is_some() {
+                    return self.select(self.mailbox.selection_for(self.search.query()));
+                }
+            }
             ListMessage::Loaded(request, contents) => {
-                if self.mailbox.finish_load(request, contents) {
-                    return self.refresh_list();
+                if let Some(selection_removed) =
+                    self.mailbox.finish_load(request, Some(contents), true)
+                {
+                    let selection = self.mailbox.selection_for(self.search.query());
+                    if selection_removed && selection.is_none() {
+                        self.reader.set_open(false);
+                        return self.load_body();
+                    }
+                    return self.select(selection);
                 }
             }
         }

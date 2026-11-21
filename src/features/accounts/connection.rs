@@ -35,18 +35,36 @@ where
     T: Send + 'static,
     E: From<Error> + Send + 'static,
 {
-    let work = async {
+    tokio::time::timeout(
+        Duration::from_secs(45),
+        with_imap_session(account, operation),
+    )
+    .await
+    .map_err(|_| Error::ConnectionTimeout)?
+}
+
+// Allow a folder sync to run many commands after connecting. The socket still
+// enforces read and write timeouts for an unresponsive server.
+pub(in crate::features) async fn with_imap_session<T, E>(
+    account: Account,
+    operation: impl FnOnce(&mut Session) -> Result<T, E> + Send + 'static,
+) -> Result<T, E>
+where
+    T: Send + 'static,
+    E: From<Error> + Send + 'static,
+{
+    let connect = async {
         let password = store::stored_password(account.id).await?;
-        tokio::task::spawn_blocking(move || {
-            let mut session = login_imap(&account, &password)?;
-            operation(&mut session)
-        })
+        tokio::task::spawn_blocking(move || login_imap(&account, &password))
+            .await
+            .map_err(|_| Error::ConnectionTask)?
+    };
+    let mut session = tokio::time::timeout(Duration::from_secs(45), connect)
+        .await
+        .map_err(|_| Error::ConnectionTimeout)??;
+    tokio::task::spawn_blocking(move || operation(&mut session))
         .await
         .map_err(|_| Error::ConnectionTask)?
-    };
-    tokio::time::timeout(Duration::from_secs(45), work)
-        .await
-        .map_err(|_| Error::ConnectionTimeout)?
 }
 
 fn check_imap(account: &Account, password: &Password) -> Result<(), Error> {

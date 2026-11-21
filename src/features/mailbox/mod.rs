@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
+mod cache;
 mod list;
 mod model;
 pub mod remote;
@@ -7,8 +8,13 @@ pub mod remote;
 pub use list::ListMessage;
 pub use model::{Folder, Mail, MailId};
 
-use cosmic::iced::widget::scrollable;
+use cosmic::iced::{
+    futures::{StreamExt, stream},
+    widget::scrollable,
+};
 use cosmic::widget::{self, nav_bar};
+
+const VISIBLE_MESSAGE_LIMIT: usize = 500;
 
 pub struct Mailbox {
     nav: nav_bar::Model,
@@ -17,8 +23,17 @@ pub struct Mailbox {
     list_id: widget::Id,
     list_offset: f32,
     request: u64,
+    syncing: bool,
+    downloads: Downloads,
     status: Status,
     contents: remote::FolderContents,
+}
+
+#[derive(Default)]
+struct Downloads {
+    active: usize,
+    saved: usize,
+    total: usize,
 }
 
 enum Status {
@@ -49,6 +64,8 @@ impl Mailbox {
             list_id: widget::Id::unique(),
             list_offset: 0.0,
             request: 0,
+            syncing: false,
+            downloads: Downloads::default(),
             status: Status::NoAccounts,
             contents: remote::FolderContents::default(),
         }
@@ -59,6 +76,8 @@ impl Mailbox {
         accounts: &crate::features::accounts::Accounts,
     ) -> cosmic::Task<ListMessage> {
         self.request += 1;
+        self.syncing = false;
+        self.downloads = Downloads::default();
         self.selected = None;
         self.contents = remote::FolderContents::default();
         let saved = match accounts.saved() {
@@ -73,19 +92,59 @@ impl Mailbox {
             }
         };
         self.status = Status::Loading;
+        self.syncing = true;
         let request = self.request;
-        cosmic::Task::perform(remote::load(saved, self.folder), move |contents| {
-            ListMessage::Loaded(request, contents)
+        let (send, receive) = tokio::sync::mpsc::unbounded_channel();
+        let progress = stream::unfold(receive, |mut receive| async move {
+            receive.recv().await.map(|event| (Some(event), receive))
         })
+        .chain(stream::once(async { None }));
+        cosmic::Task::perform(
+            remote::cached(saved.clone(), self.folder),
+            move |contents| ListMessage::Cached(request, contents),
+        )
+        .chain(cosmic::Task::batch([
+            cosmic::Task::perform(remote::load(saved, self.folder, send), move |contents| {
+                ListMessage::Loaded(request, contents)
+            }),
+            cosmic::Task::run(progress, move |event| ListMessage::Download(request, event)),
+        ]))
     }
 
-    pub fn finish_load(&mut self, request: u64, contents: remote::FolderContents) -> bool {
+    pub fn update_download(&mut self, request: u64, event: Option<remote::DownloadEvent>) {
         if request != self.request {
-            return false;
+            return;
         }
+        match event {
+            Some(remote::DownloadEvent::Started(total)) => {
+                self.downloads.active += 1;
+                self.downloads.total += total;
+            }
+            Some(remote::DownloadEvent::Saved(saved)) => self.downloads.saved += saved,
+            Some(remote::DownloadEvent::Finished) => self.downloads.active -= 1,
+            None => self.downloads = Downloads::default(),
+        }
+    }
+
+    pub fn finish_load(
+        &mut self,
+        request: u64,
+        contents: Option<remote::FolderContents>,
+        synced: bool,
+    ) -> Option<bool> {
+        if request != self.request {
+            return None;
+        }
+        self.syncing = !synced;
+        let contents = contents?;
+        let selection = self.selected().map(|mail| &mail.id);
+        let selected =
+            selection.and_then(|id| contents.messages.iter().position(|mail| &mail.id == id));
+        let selection_removed = selection.is_some() && selected.is_none();
+        self.selected = selected;
         self.contents = contents;
         self.status = Status::Loaded;
-        true
+        Some(selection_removed)
     }
 
     pub fn nav_model(&self) -> &nav_bar::Model {
@@ -119,9 +178,11 @@ impl Mailbox {
     }
 
     pub fn selection_for(&self, query: &str) -> Option<usize> {
+        let mut visible = self.visible_messages(query);
+        let first = visible.next()?.0;
         self.selected
-            .filter(|&id| self.contents.messages[id].matches(query))
-            .or_else(|| self.visible_messages(query).next().map(|(id, _)| id))
+            .filter(|&id| id == first || visible.any(|(visible_id, _)| visible_id == id))
+            .or(Some(first))
     }
 
     pub fn remember_scroll(&mut self, offset: f32) {
@@ -136,10 +197,11 @@ impl Mailbox {
         cosmic::Task::batch([scroll, focus])
     }
 
-    fn visible_messages<'a>(
-        &'a self,
-        query: &'a str,
-    ) -> impl DoubleEndedIterator<Item = (usize, &'a Mail)> {
+    fn visible_messages<'a>(&'a self, query: &'a str) -> impl Iterator<Item = (usize, &'a Mail)> {
+        self.matching_messages(query).take(VISIBLE_MESSAGE_LIMIT)
+    }
+
+    fn matching_messages<'a>(&'a self, query: &'a str) -> impl Iterator<Item = (usize, &'a Mail)> {
         self.contents
             .messages
             .iter()
