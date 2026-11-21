@@ -70,11 +70,28 @@ impl EmailView {
         let html = body.into_html()?;
         let url = self.runtime.message_url();
         self.delegate.replace_document(url.clone(), html);
+        self.load(url);
+        Ok(())
+    }
+
+    /// Allows external images for the current message and reloads it.
+    pub fn show_remote_images(&mut self) {
+        if !self.remote_images_enabled() {
+            let url = self.runtime.message_url();
+            self.delegate.enable_remote_images(url.clone());
+            self.load(url);
+        }
+    }
+
+    pub fn remote_images_enabled(&self) -> bool {
+        self.delegate.remote_images_enabled()
+    }
+
+    fn load(&mut self, url: url::Url) {
         self.frame.get_mut().take();
         self.dragging.set(false);
         self.webview.load(url);
         self.runtime.wake();
-        Ok(())
     }
 
     pub fn view<Message>(&self) -> Element<'_, Message> {

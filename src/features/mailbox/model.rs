@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use crate::fl;
-use cosmic_ext_mail::EmailBody;
+use uuid::Uuid;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Folder {
@@ -42,25 +42,29 @@ impl Folder {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct MailId {
+    pub account: Uuid,
+    pub folder: String,
+    pub uid_validity: u32,
+    pub uid: u32,
+}
+
+#[derive(Clone, Debug)]
 pub struct Mail {
-    pub folder: Folder,
+    pub id: MailId,
+    pub account_email: String,
     pub unread: bool,
-    pub sender: &'static str,
-    pub address: &'static str,
-    pub subject: &'static str,
-    pub snippet: &'static str,
-    pub time: &'static str,
-    pub body: EmailBody<'static>,
-    pub attachment: Option<&'static str>,
+    pub sender: String,
+    pub address: String,
+    pub subject: String,
+    pub time: String,
+    pub timestamp: i64,
 }
 
 impl Mail {
     pub fn matches(&self, query: &str) -> bool {
-        let text = format!(
-            "{} {} {} {}",
-            self.sender, self.address, self.subject, self.snippet
-        )
-        .to_lowercase();
+        let text = format!("{} {} {}", self.sender, self.address, self.subject).to_lowercase();
         query
             .split_whitespace()
             .all(|word| text.contains(&word.to_lowercase()))

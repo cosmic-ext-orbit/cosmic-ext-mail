@@ -11,10 +11,19 @@ pub(super) fn decode(raw: &[u8]) -> Result<(String, HashMap<String, String>), St
         .ok_or("Could not parse the MIME message")?;
     let mut images = HashMap::new();
     for part in message.root().parts() {
-        if let Some(id) = part.content_id()
+        let id = part.content_id();
+        let location = part.content_location();
+        if (id.is_some() || location.is_some())
             && let Some(image) = inline_image(part)
         {
-            images.entry(id.to_owned()).or_insert(image);
+            if let Some(id) = id {
+                images
+                    .entry(format!("cid:{}", id.trim().trim_matches(['<', '>'])))
+                    .or_insert_with(|| image.clone());
+            }
+            if let Some(location) = location {
+                images.entry(location.trim().to_owned()).or_insert(image);
+            }
         }
     }
 

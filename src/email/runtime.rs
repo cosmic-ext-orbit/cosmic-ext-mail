@@ -69,7 +69,7 @@ impl Runtime {
     pub(super) fn message_url(&self) -> Url {
         let id = self.next_message_id.get();
         self.next_message_id.set(id + 1);
-        Url::parse(&format!("https://cosmic-mail.invalid/message/{id}")).expect("valid message URL")
+        Url::parse(&format!("http://cosmic-mail.invalid/message/{id}")).expect("valid message URL")
     }
 }
 

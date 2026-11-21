@@ -11,6 +11,7 @@ use url::Url;
 struct Document {
     url: Url,
     html: String,
+    remote_images: bool,
 }
 
 pub(super) struct Delegate {
@@ -45,7 +46,13 @@ impl WebViewDelegate for Delegate {
         let document = self.document.borrow();
         let request = load.request();
         let url = request.url.as_url();
-        if !request.is_for_main_frame && url.scheme() == "data" {
+        if !request.is_for_main_frame
+            && (url.scheme() == "data"
+                || (document.remote_images
+                    && request.method == http::Method::GET
+                    && matches!(url.scheme(), "http" | "https")
+                    && url.host_str() != document.url.host_str()))
+        {
             return;
         }
         let mut response = WebResourceResponse::new(url.clone());
@@ -61,13 +68,27 @@ impl WebViewDelegate for Delegate {
             HeaderValue::from_static("text/html; charset=utf-8"),
         );
         headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-        headers.insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static(
-            "default-src 'none'; img-src data:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; sandbox",
-        ));
+        let images = if document.remote_images {
+            "data: http: https:"
+        } else {
+            "data:"
+        };
+        let policy = format!(
+            "default-src 'none'; img-src {images}; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; sandbox"
+        );
+        headers.insert(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_str(&policy).expect("valid image policy"),
+        );
+        headers.insert(
+            header::REFERRER_POLICY,
+            HeaderValue::from_static("no-referrer"),
+        );
         headers.insert("x-dns-prefetch-control", HeaderValue::from_static("off"));
         response.headers = headers;
-        load.intercept(response)
-            .send_body_data(document.html.as_bytes().to_vec());
+        let mut intercepted = load.intercept(response);
+        intercepted.send_body_data(document.html.as_bytes().to_vec());
+        intercepted.finish();
     }
 
     fn notify_new_frame_ready(&self, _: WebView) {
@@ -94,7 +115,11 @@ impl ClipboardDelegate for Delegate {
 impl Delegate {
     pub(super) fn new(url: Url, html: String) -> Self {
         Self {
-            document: RefCell::new(Document { url, html }),
+            document: RefCell::new(Document {
+                url,
+                html,
+                remote_images: false,
+            }),
             frame_ready: Cell::new(false),
             copied: RefCell::new(None),
             cursor: Cell::new(servo::Cursor::default()),
@@ -102,7 +127,23 @@ impl Delegate {
     }
 
     pub(super) fn replace_document(&self, url: Url, html: String) {
-        *self.document.borrow_mut() = Document { url, html };
+        *self.document.borrow_mut() = Document {
+            url,
+            html,
+            remote_images: false,
+        };
+        self.frame_ready.set(false);
+        self.copied.borrow_mut().take();
+    }
+
+    pub(super) fn remote_images_enabled(&self) -> bool {
+        self.document.borrow().remote_images
+    }
+
+    pub(super) fn enable_remote_images(&self, url: Url) {
+        let mut document = self.document.borrow_mut();
+        document.url = url;
+        document.remote_images = true;
         self.frame_ready.set(false);
         self.copied.borrow_mut().take();
     }

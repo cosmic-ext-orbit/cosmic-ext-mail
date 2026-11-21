@@ -2,13 +2,6 @@
 
 A mail client for the COSMIC desktop
 
-## Servo preview
-
-Run `cargo run --locked` to open a COSMIC window with a sample receipt.
-The reading pane hosts a live Servo webview. Resize the window to reflow the
-receipt, scroll inside the pane, or drag to select text and press Ctrl+C. The
-sample has no external assets or scripts.
-
 The first build may compile SpiderMonkey from source, which requires LLVM
 tools on `PATH`. If your distro installs them under a versioned directory,
 prepend that directory to `PATH` before running Cargo.

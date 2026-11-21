@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use crate::features::{
+    accounts::{self, Accounts},
     composer::{Composer, ComposerMessage},
     mailbox::{ListMessage, Mailbox},
     reader::{Reader, ReaderMessage},
@@ -10,7 +11,7 @@ use crate::fl;
 use cosmic::app::Task;
 use cosmic::iced::{Event, Length, Subscription, event, keyboard, window};
 use cosmic::prelude::*;
-use cosmic::widget::{self, nav_bar, pane_grid};
+use cosmic::widget::{nav_bar, pane_grid};
 
 const SIDEBAR_COLLAPSE_WIDTH: f32 = 900.0;
 const SINGLE_PANE_WIDTH: f32 = 600.0;
@@ -23,6 +24,7 @@ enum Pane {
 
 #[derive(Clone, Debug)]
 pub enum Message {
+    Accounts(accounts::Message),
     Search(SearchMessage),
     List(ListMessage),
     Reader(ReaderMessage),
@@ -32,6 +34,7 @@ pub enum Message {
 
 pub struct AppModel {
     core: cosmic::Core,
+    accounts: Accounts,
     mailbox: Mailbox,
     reader: Reader,
     search: Search,
@@ -58,7 +61,7 @@ impl cosmic::Application for AppModel {
 
     fn init(core: cosmic::Core, _: ()) -> (Self, Task<Message>) {
         let mailbox = Mailbox::new();
-        let reader = Reader::new(mailbox.selected());
+        let reader = Reader::new();
         let (mut panes, list) = pane_grid::State::new(Pane::Messages);
         let (_, divider) = panes
             .split(pane_grid::Axis::Vertical, list, Pane::Reader)
@@ -67,6 +70,7 @@ impl cosmic::Application for AppModel {
 
         let mut app = Self {
             core,
+            accounts: Accounts::new(),
             mailbox,
             reader,
             search: Search::new(),
@@ -79,7 +83,8 @@ impl cosmic::Application for AppModel {
             .core
             .main_window_id()
             .map_or_else(Task::none, |id| app.set_window_title(fl!("app-title"), id));
-        (app, title)
+        let load = app.reload_mail();
+        (app, Task::batch([title, load]))
     }
 
     fn header_start(&self) -> Vec<Element<'_, Message>> {
@@ -88,6 +93,10 @@ impl cosmic::Application for AppModel {
 
     fn header_center(&self) -> Vec<Element<'_, Message>> {
         vec![self.search.view(self.narrow).map(Message::Search)]
+    }
+
+    fn header_end(&self) -> Vec<Element<'_, Message>> {
+        vec![self.accounts.button().map(Message::Accounts)]
     }
 
     fn nav_model(&self) -> Option<&nav_bar::Model> {
@@ -99,7 +108,7 @@ impl cosmic::Application for AppModel {
             return Task::none();
         }
         self.search.clear();
-        self.refresh_list()
+        self.reload_mail()
     }
 
     fn on_window_resize(&mut self, id: window::Id, width: f32, _: f32) {
@@ -123,8 +132,25 @@ impl cosmic::Application for AppModel {
 
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::Accounts(message) => {
+                let reload = matches!(
+                    &message,
+                    accounts::Message::Finished(Ok(
+                        accounts::Outcome::Saved(_) | accounts::Outcome::Removed(_)
+                    ))
+                );
+                let update = self
+                    .accounts
+                    .update(message)
+                    .map(|message| Message::Accounts(message).into());
+                return if reload {
+                    Task::batch([update, self.reload_mail()])
+                } else {
+                    update
+                };
+            }
             Message::Search(message) => return self.update_search(message),
-            Message::List(message) => self.update_list(message),
+            Message::List(message) => return self.update_list(message),
             Message::Reader(message) => return self.update_reader(message),
             Message::Composer(message) => self.composer.update(message),
             Message::ResizePanes(event) => self.panes.resize(event.split, event.ratio),
@@ -164,16 +190,16 @@ impl cosmic::Application for AppModel {
             .into()
         };
 
-        let mut page = widget::column::with_capacity(2)
-            .push(content)
-            .height(Length::Fill);
-        if let Some(undo) = self.mailbox.undo_view() {
-            page = page.push(undo.map(Message::List));
-        }
-        page.into()
+        content
     }
 
     fn on_escape(&mut self) -> Task<Message> {
+        if self.accounts.is_open() {
+            return self
+                .accounts
+                .update(accounts::Message::Close)
+                .map(|message| Message::Accounts(message).into());
+        }
         if self.composer.is_open() {
             self.composer.update(ComposerMessage::Save);
             return Task::none();
@@ -182,6 +208,9 @@ impl cosmic::Application for AppModel {
     }
 
     fn dialog(&self) -> Option<Element<'_, Message>> {
+        if let Some(dialog) = self.accounts.dialog() {
+            return Some(dialog.map(Message::Accounts));
+        }
         self.composer
             .dialog()
             .map(|dialog| dialog.map(Message::Composer))
@@ -206,24 +235,33 @@ impl AppModel {
         }
     }
 
-    fn update_list(&mut self, message: ListMessage) {
+    fn update_list(&mut self, message: ListMessage) -> Task<Message> {
         match message {
             ListMessage::Select(id) => {
-                self.select(Some(id));
+                let task = self.select(Some(id));
                 self.open_selected();
+                return task;
             }
             ListMessage::Step(direction) => {
-                self.select(self.mailbox.step_selection(self.search.query(), direction));
+                return self.select(self.mailbox.step_selection(self.search.query(), direction));
             }
             ListMessage::OpenSelected => self.open_selected(),
             ListMessage::Scrolled(offset) => self.mailbox.remember_scroll(offset),
             ListMessage::ResumeDraft => self.composer.update(ComposerMessage::Open),
-            ListMessage::UndoMove => {
-                if self.mailbox.undo_move() {
-                    self.select(self.mailbox.selection_for(self.search.query()));
+            ListMessage::Refresh => return self.reload_mail(),
+            ListMessage::AddAccount => {
+                return self
+                    .accounts
+                    .update(accounts::Message::Add)
+                    .map(|message| Message::Accounts(message).into());
+            }
+            ListMessage::Loaded(request, contents) => {
+                if self.mailbox.finish_load(request, contents) {
+                    return self.refresh_list();
                 }
             }
         }
+        Task::none()
     }
 
     fn update_reader(&mut self, message: ReaderMessage) -> Task<Message> {
@@ -236,34 +274,53 @@ impl AppModel {
                     .restore_list_position()
                     .map(|message| Message::List(message).into());
             }
-            ReaderMessage::ToggleUnread => self.mailbox.toggle_selected_unread(),
-            ReaderMessage::MoveTo(folder) => {
-                let next = self.mailbox.move_selected(folder, self.search.query());
-                self.select(next);
-            }
+            ReaderMessage::ShowRemoteImages => self.reader.show_remote_images(),
+            ReaderMessage::Retry => return self.load_body(),
+            ReaderMessage::Loaded(request, result) => self.reader.finish_load(request, result),
             ReaderMessage::Reply => self.composer.reply(self.mailbox.selected()),
         }
         Task::none()
     }
 
-    fn refresh_list(&mut self) -> Task<Message> {
+    fn reload_mail(&mut self) -> Task<Message> {
+        let reload = self.mailbox.reload(&self.accounts);
         self.reader.set_open(false);
-        self.select(self.mailbox.selection_for(self.search.query()));
-        self.mailbox
-            .scroll_to(0.0)
-            .map(|message| Message::List(message).into())
+        Task::batch([
+            reload.map(|message| Message::List(message).into()),
+            self.load_body(),
+            self.mailbox
+                .scroll_to(0.0)
+                .map(|message| Message::List(message).into()),
+        ])
     }
 
-    fn select(&mut self, selection: Option<usize>) {
+    fn refresh_list(&mut self) -> Task<Message> {
+        self.reader.set_open(false);
+        Task::batch([
+            self.select(self.mailbox.selection_for(self.search.query())),
+            self.mailbox
+                .scroll_to(0.0)
+                .map(|message| Message::List(message).into()),
+        ])
+    }
+
+    fn select(&mut self, selection: Option<usize>) -> Task<Message> {
         if self.mailbox.set_selection(selection) {
-            self.reader.set_message(self.mailbox.selected());
+            self.load_body()
+        } else {
+            Task::none()
         }
+    }
+
+    fn load_body(&mut self) -> Task<Message> {
+        self.reader
+            .load(self.mailbox.selected(), &self.accounts)
+            .map(|message| Message::Reader(message).into())
     }
 
     fn open_selected(&mut self) {
         if self.mailbox.selected().is_some() {
             self.reader.set_open(true);
-            self.mailbox.mark_selected_read();
         }
     }
 }
@@ -278,6 +335,9 @@ fn shortcut(event: Event, status: event::Status, _: window::Id) -> Option<Messag
         return None;
     }
     match key.as_ref() {
+        keyboard::Key::Character(",") if modifiers.control() => {
+            Some(Message::Accounts(accounts::Message::Open))
+        }
         keyboard::Key::Character("f") if modifiers.control() => {
             Some(Message::Search(SearchMessage::Focus))
         }

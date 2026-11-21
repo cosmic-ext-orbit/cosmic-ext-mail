@@ -13,14 +13,19 @@ pub(super) fn prepare(html: &str, images: &HashMap<String, String>) -> Result<St
             }
         ))
         .append_element_content_handler(element!("img[src]", |element| {
-            if let Some(src) = element.get_attribute("src")
-                && let Some((scheme, id)) = src.trim().split_once(':')
-                && scheme.eq_ignore_ascii_case("cid")
-            {
-                element.remove_attribute("src");
-                if let Ok(id) = urlencoding::decode(id)
-                    && let Some(image) = images.get(id.as_ref())
+            if let Some(src) = element.get_attribute("src") {
+                let src = src.trim();
+                if let Some((scheme, id)) = src.split_once(':')
+                    && scheme.eq_ignore_ascii_case("cid")
                 {
+                    element.remove_attribute("src");
+                    if let Ok(id) = urlencoding::decode(id)
+                        && let Some(image) =
+                            images.get(&format!("cid:{}", id.trim_matches(['<', '>'])))
+                    {
+                        element.set_attribute("src", image)?;
+                    }
+                } else if let Some(image) = images.get(src) {
                     element.set_attribute("src", image)?;
                 }
             }

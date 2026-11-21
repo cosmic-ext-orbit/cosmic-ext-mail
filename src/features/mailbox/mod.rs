@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-mod fixtures;
 mod list;
 mod model;
+pub mod remote;
 
 pub use list::ListMessage;
-pub use model::{Folder, Mail};
+pub use model::{Folder, Mail, MailId};
 
 use cosmic::iced::widget::scrollable;
 use cosmic::widget::{self, nav_bar};
@@ -13,19 +13,23 @@ use cosmic::widget::{self, nav_bar};
 pub struct Mailbox {
     nav: nav_bar::Model,
     folder: Folder,
-    messages: Vec<Mail>,
     selected: Option<usize>,
     list_id: widget::Id,
     list_offset: f32,
-    undo: Option<(usize, Folder)>,
+    request: u64,
+    status: Status,
+    contents: remote::FolderContents,
+}
+
+enum Status {
+    NoAccounts,
+    Loading,
+    Loaded,
+    SettingsError(crate::features::accounts::Error),
 }
 
 impl Mailbox {
     pub fn new() -> Self {
-        let messages = fixtures::sample_mail();
-        let selected = messages
-            .iter()
-            .position(|mail| mail.folder == Folder::Inbox);
         let mut nav = nav_bar::Model::default();
         for folder in Folder::ALL {
             let item = nav
@@ -38,17 +42,50 @@ impl Mailbox {
             }
         }
 
-        let mut mailbox = Self {
+        Self {
             nav,
             folder: Folder::Inbox,
-            messages,
-            selected,
+            selected: None,
             list_id: widget::Id::unique(),
             list_offset: 0.0,
-            undo: None,
+            request: 0,
+            status: Status::NoAccounts,
+            contents: remote::FolderContents::default(),
+        }
+    }
+
+    pub fn reload(
+        &mut self,
+        accounts: &crate::features::accounts::Accounts,
+    ) -> cosmic::Task<ListMessage> {
+        self.request += 1;
+        self.selected = None;
+        self.contents = remote::FolderContents::default();
+        let saved = match accounts.saved() {
+            Ok([]) => {
+                self.status = Status::NoAccounts;
+                return cosmic::Task::none();
+            }
+            Ok(accounts) => accounts.to_vec(),
+            Err(error) => {
+                self.status = Status::SettingsError(error);
+                return cosmic::Task::none();
+            }
         };
-        mailbox.update_folder_counts();
-        mailbox
+        self.status = Status::Loading;
+        let request = self.request;
+        cosmic::Task::perform(remote::load(saved, self.folder), move |contents| {
+            ListMessage::Loaded(request, contents)
+        })
+    }
+
+    pub fn finish_load(&mut self, request: u64, contents: remote::FolderContents) -> bool {
+        if request != self.request {
+            return false;
+        }
+        self.contents = contents;
+        self.status = Status::Loaded;
+        true
     }
 
     pub fn nav_model(&self) -> &nav_bar::Model {
@@ -68,11 +105,13 @@ impl Mailbox {
     }
 
     pub fn selected(&self) -> Option<&Mail> {
-        self.selected.map(|id| &self.messages[id])
+        self.selected.and_then(|id| self.contents.messages.get(id))
     }
 
     pub fn set_selection(&mut self, selection: Option<usize>) -> bool {
-        if self.selected == selection {
+        if self.selected == selection
+            || selection.is_some_and(|id| id >= self.contents.messages.len())
+        {
             return false;
         }
         self.selected = selection;
@@ -81,50 +120,8 @@ impl Mailbox {
 
     pub fn selection_for(&self, query: &str) -> Option<usize> {
         self.selected
-            .filter(|&id| {
-                self.messages[id].folder == self.folder && self.messages[id].matches(query)
-            })
+            .filter(|&id| self.contents.messages[id].matches(query))
             .or_else(|| self.visible_messages(query).next().map(|(id, _)| id))
-    }
-
-    pub fn mark_selected_read(&mut self) {
-        if let Some(id) = self.selected {
-            self.messages[id].unread = false;
-            self.update_folder_counts();
-        }
-    }
-
-    pub fn toggle_selected_unread(&mut self) {
-        if let Some(id) = self.selected {
-            self.messages[id].unread = !self.messages[id].unread;
-            self.update_folder_counts();
-        }
-    }
-
-    pub fn move_selected(&mut self, folder: Folder, query: &str) -> Option<usize> {
-        let id = self.selected?;
-        let next = self
-            .visible_messages(query)
-            .find(|(candidate, _)| *candidate > id)
-            .or_else(|| {
-                self.visible_messages(query)
-                    .rev()
-                    .find(|(candidate, _)| *candidate < id)
-            })
-            .map(|(candidate, _)| candidate);
-        let previous = std::mem::replace(&mut self.messages[id].folder, folder);
-        self.undo = Some((id, previous));
-        self.update_folder_counts();
-        next
-    }
-
-    pub fn undo_move(&mut self) -> bool {
-        let Some((id, folder)) = self.undo.take() else {
-            return false;
-        };
-        self.messages[id].folder = folder;
-        self.update_folder_counts();
-        true
     }
 
     pub fn remember_scroll(&mut self, offset: f32) {
@@ -143,33 +140,11 @@ impl Mailbox {
         &'a self,
         query: &'a str,
     ) -> impl DoubleEndedIterator<Item = (usize, &'a Mail)> {
-        self.messages
+        self.contents
+            .messages
             .iter()
             .enumerate()
-            .filter(move |(_, mail)| mail.folder == self.folder && mail.matches(query))
-    }
-
-    fn update_folder_counts(&mut self) {
-        let ids: Vec<_> = self.nav.iter().collect();
-        for id in ids {
-            let Some(&folder) = self.nav.data::<Folder>(id) else {
-                continue;
-            };
-            let unread = self
-                .messages
-                .iter()
-                .filter(|mail| mail.folder == folder && mail.unread)
-                .count();
-            let label = folder.label();
-            self.nav.text_set(
-                id,
-                if unread == 0 {
-                    label
-                } else {
-                    format!("{label}  {unread}")
-                },
-            );
-        }
+            .filter(move |(_, mail)| mail.matches(query))
     }
 
     pub fn step_selection(&self, query: &str, step: isize) -> Option<usize> {
