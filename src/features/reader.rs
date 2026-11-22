@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use crate::{
-    config::MessageActions,
-    features::mailbox::{Folder, Mail, remote},
+    config::{Config, MessageActions},
+    features::mailbox::{Contact, Folder, Mail, remote},
     fl,
 };
+use cosmic::widget::menu;
 use cosmic::{Element, widget};
 use cosmic::{
     Task,
@@ -25,7 +26,8 @@ pub enum Message {
     Loaded(u64, Result<Arc<[u8]>, remote::Error>),
     Reply,
     Forward,
-    ToggleMore,
+    CopyAddress(String),
+    ComposeTo(String),
     Change(remote::Change),
     Changed(Folder, u64, Result<(), remote::Error>),
 }
@@ -34,9 +36,8 @@ pub struct Reader {
     email: Option<EmailView>,
     body: Body,
     request: u64,
-    recipients: String,
+    recipients: Vec<Contact>,
     forward_text: String,
-    more: bool,
     changing: bool,
     action_error: Option<String>,
     open: bool,
@@ -55,9 +56,8 @@ impl Reader {
             email: None,
             body: Body::Empty,
             request: 0,
-            recipients: String::new(),
+            recipients: Vec::new(),
             forward_text: String::new(),
-            more: false,
             changing: false,
             action_error: None,
             open: false,
@@ -73,7 +73,6 @@ impl Reader {
         self.body = Body::Empty;
         self.recipients.clear();
         self.forward_text.clear();
-        self.more = false;
         self.action_error = None;
         let Some(mail) = mail else {
             return Task::none();
@@ -106,20 +105,7 @@ impl Reader {
         let rendered = result.map_err(remote::Error::text).and_then(|bytes| {
             let message = MessageParser::new().parse(&bytes);
             if let Some(addresses) = message.as_ref().and_then(|message| message.to()) {
-                self.recipients = addresses
-                    .mailboxes()
-                    .filter_map(|recipient| {
-                        let address = recipient.address().filter(|address| !address.is_empty());
-                        let name = recipient.name().filter(|name| !name.is_empty());
-                        match (name, address) {
-                            (Some(name), Some(address)) if name != address => {
-                                Some(format!("{name} <{address}>"))
-                            }
-                            (name, address) => address.or(name).map(str::to_owned),
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", ");
+                self.recipients = Contact::from_list(addresses);
             }
 
             if let Some(text) = message.as_ref().and_then(|message| message.body_text(0)) {
@@ -153,10 +139,6 @@ impl Reader {
 
     pub fn set_action_error(&mut self, error: String) {
         self.action_error = Some(error);
-    }
-
-    pub fn toggle_more(&mut self) {
-        self.more = !self.more;
     }
 
     pub fn begin_change(&mut self) -> Option<u64> {
@@ -194,7 +176,8 @@ impl Reader {
         mail: Option<&'a Mail>,
         folder: Folder,
         narrow: bool,
-        style: MessageActions,
+        config: &'a Config,
+        photos: Option<&'a crate::features::avatars::Avatars>,
     ) -> Element<'a, Message> {
         let mut page = widget::column::with_capacity(4)
             .spacing(8)
@@ -217,8 +200,16 @@ impl Reader {
             Body::Empty | Body::Loading => widget::text::body(fl!("mail-body-loading")).into(),
         };
         page.push(
-            widget::responsive(move |size| self.header(mail, folder, style, size.width))
-                .height(Length::Shrink),
+            widget::responsive(move |size| {
+                self.header(
+                    mail,
+                    folder,
+                    config,
+                    photos.and_then(|photos| photos.get(&mail.address)),
+                    size.width,
+                )
+            })
+            .height(Length::Shrink),
         )
         .push(widget::divider::horizontal::default())
         .push(body)
@@ -229,16 +220,35 @@ impl Reader {
         &'a self,
         mail: &'a Mail,
         folder: Folder,
-        style: MessageActions,
+        config: &Config,
+        photo: Option<&cosmic::iced::widget::image::Handle>,
         width: f32,
     ) -> Element<'a, Message> {
+        let style = config.message_actions;
+        let recipients = mail.recipients.as_deref().unwrap_or(&self.recipients);
         let mut sender = widget::column::with_capacity(2)
             .push(widget::text::heading(mail.sender.as_str()))
             .width(Length::Fill)
             .spacing(2);
         if !mail.address.is_empty() && mail.address != mail.sender {
-            sender = sender.push(widget::text::body(mail.address.as_str()));
+            sender = sender.push(address_menu(&mail.address, &mail.address));
+        } else if !mail.address.is_empty() {
+            sender = widget::column::with_capacity(1)
+                .width(Length::Fill)
+                .push(address_menu(&mail.address, &mail.address));
         }
+
+        let sender: Element<_> = if config.show_recipient_pictures {
+            widget::row::with_capacity(2)
+                .width(Length::Fill)
+                .spacing(8)
+                .align_y(cosmic::iced::Alignment::Center)
+                .push(mail.sender_picture(36.0, photo))
+                .push(sender)
+                .into()
+        } else {
+            sender.into()
+        };
 
         let change = |action| (!self.changing).then_some(Message::Change(action));
         let move_to = |destination| {
@@ -277,12 +287,7 @@ impl Reader {
                 fl!("delete-message"),
                 move_to(Folder::Trash),
             ),
-            action_button(
-                style,
-                "view-more-symbolic",
-                fl!("more-message-actions"),
-                Some(Message::ToggleMore),
-            ),
+            self.more_menu(mail, style),
             action_button(
                 style,
                 if mail.flagged {
@@ -301,19 +306,27 @@ impl Reader {
         .spacing(4)
         .wrap();
 
-        let mut metadata =
-            widget::row::with_capacity(2)
-                .spacing(8)
-                .push(if self.recipients.is_empty() {
-                    Element::from(widget::space::horizontal())
+        let mut recipient_row = widget::row::with_capacity(recipients.len() + 1).spacing(4);
+        if !recipients.is_empty() {
+            recipient_row = recipient_row.push(widget::text::caption(fl!("recipient")));
+            for recipient in recipients {
+                let label = match (recipient.name.as_str(), recipient.address.as_str()) {
+                    ("", address) => address.to_owned(),
+                    (name, "") => name.to_owned(),
+                    (name, address) if name == address => address.to_owned(),
+                    (name, address) => format!("{name} <{address}>"),
+                };
+                recipient_row = recipient_row.push(if recipient.address.is_empty() {
+                    widget::text::caption(label).into()
                 } else {
-                    widget::text::caption(fl!("mail-to", recipients = self.recipients.as_str()))
-                        .width(Length::Fill)
-                        .into()
+                    address_menu(label, &recipient.address)
                 });
-        if !mail.time.is_empty() {
-            metadata = metadata.push(widget::text::caption(mail.time.as_str()));
+            }
         }
+        let metadata = widget::row::with_capacity(2)
+            .spacing(8)
+            .push(widget::container(recipient_row.wrap()).width(Length::Fill))
+            .push(widget::text::caption(mail.display_time()));
 
         let mut header = widget::column::with_capacity(4).spacing(8);
         let inline_width = match style {
@@ -340,39 +353,41 @@ impl Reader {
         if let Some(actions) = trailing_actions {
             header = header.push(actions);
         }
-        if self.more {
-            let (icon, label) = if mail.unread {
-                ("mail-mark-read-symbolic", fl!("mark-message-read"))
-            } else {
-                ("mail-mark-unread-symbolic", fl!("mark-message-unread"))
-            };
-            let mut more = widget::row::with_capacity(2).spacing(4).push(action_button(
-                style,
-                icon,
-                label,
-                change(remote::Change::Seen(mail.unread)),
-            ));
-            if matches!(self.body, Body::Ready)
-                && self
-                    .email
-                    .as_ref()
-                    .is_some_and(|view| !view.remote_images_enabled())
-            {
-                more = more.push(action_button(
-                    style,
-                    "insert-image-symbolic",
-                    fl!("mail-show-remote-images"),
-                    Some(Message::ShowRemoteImages),
-                ));
-            }
-            header = header.push(more.wrap());
-        }
         if self.changing {
             header = header.push(widget::text::caption(fl!("mail-change-working")));
         } else if let Some(error) = &self.action_error {
             header = header.push(widget::text::caption(error.as_str()));
         }
         header.into()
+    }
+    fn more_menu(&self, mail: &Mail, style: MessageActions) -> Element<'static, Message> {
+        let label = if mail.unread {
+            fl!("mark-message-read")
+        } else {
+            fl!("mark-message-unread")
+        };
+        let mut items = vec![(
+            label,
+            (!self.changing).then_some(Message::Change(remote::Change::Seen(mail.unread))),
+        )];
+        if matches!(self.body, Body::Ready)
+            && self
+                .email
+                .as_ref()
+                .is_some_and(|view| !view.remote_images_enabled())
+        {
+            items.push((
+                fl!("mail-show-remote-images"),
+                Some(Message::ShowRemoteImages),
+            ));
+        }
+        let root = action_button(
+            style,
+            "view-more-symbolic",
+            fl!("more-message-actions"),
+            Some(Message::Wake),
+        );
+        dropdown_menu(root, items)
     }
 }
 
@@ -395,4 +410,48 @@ fn action_button(
             .on_press_maybe(message)
             .into(),
     }
+}
+
+fn address_menu(label: impl Into<String>, address: &str) -> Element<'static, Message> {
+    let label =
+        cosmic::iced::widget::rich_text::<(), _, _, _>([
+            cosmic::iced::widget::span(label.into()).underline(true)
+        ])
+        .class(cosmic::theme::Text::Accent);
+    let root = Element::from(
+        widget::button::custom(label)
+            .class(cosmic::theme::Button::MenuRoot)
+            .padding([2, 4])
+            .force_enabled(true),
+    );
+    dropdown_menu(
+        root,
+        vec![
+            (
+                fl!("copy-email-address"),
+                Some(Message::CopyAddress(address.to_owned())),
+            ),
+            (
+                fl!("compose-to-address"),
+                Some(Message::ComposeTo(address.to_owned())),
+            ),
+        ],
+    )
+}
+
+fn dropdown_menu(
+    root: Element<'static, Message>,
+    items: Vec<(String, Option<Message>)>,
+) -> Element<'static, Message> {
+    let children = items
+        .into_iter()
+        .map(|(label, message)| {
+            menu::Tree::new(Element::from(
+                menu::menu_button(vec![widget::text(label).into()]).on_press_maybe(message),
+            ))
+        })
+        .collect();
+    menu::bar(vec![menu::Tree::with_children(root, children)])
+        .item_width(menu::ItemWidth::Uniform(220))
+        .into()
 }

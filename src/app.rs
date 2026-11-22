@@ -3,6 +3,7 @@
 use crate::config::{Config, MessageActions};
 use crate::features::{
     accounts::{self, Accounts},
+    avatars::Avatars,
     composer::{self, Composer},
     mailbox::{self, Mailbox},
     reader::{self, Reader},
@@ -51,6 +52,9 @@ pub enum Message {
     CloseContext,
     LaunchUrl(String),
     SetLoadRemoteImages(bool),
+    SetShowSenderPictures(bool),
+    SetFetchSenderPhotos(bool),
+    SenderPhoto(String, Option<cosmic::iced::widget::image::Handle>),
     SetMessageActions(usize),
     ConfigUpdated(Config),
 }
@@ -64,6 +68,7 @@ pub struct AppModel {
     config_error: bool,
     accounts: Accounts,
     mailbox: Mailbox,
+    avatars: Avatars,
     reader: Reader,
     search: Search,
     composer: Composer,
@@ -118,6 +123,7 @@ impl cosmic::Application for AppModel {
             config_error,
             accounts: Accounts::new(),
             mailbox: Mailbox::new(),
+            avatars: Avatars::default(),
             reader: Reader::new(),
             search: Search::new(),
             composer: Composer::default(),
@@ -198,7 +204,15 @@ impl cosmic::Application for AppModel {
     }
 
     fn subscription(&self) -> Subscription<Message> {
+        let photos = self
+            .sender_photos()
+            .map_or_else(Subscription::none, |avatars| {
+                avatars
+                    .subscription(self.mailbox.visible_sender_addresses(self.search.query()))
+                    .map(|(address, photo)| Message::SenderPhoto(address, photo))
+            });
         Subscription::batch([
+            photos,
             self.reader.subscription().map(Message::Reader),
             event::listen_with(shortcut),
             self.watch_config(Self::APP_ID)
@@ -239,7 +253,10 @@ impl cosmic::Application for AppModel {
             Message::LaunchUrl(url) => {
                 let _ = open::that_detached(url);
             }
-            Message::SetLoadRemoteImages(_) | Message::SetMessageActions(_) => {
+            Message::SetLoadRemoteImages(_)
+            | Message::SetShowSenderPictures(_)
+            | Message::SetFetchSenderPhotos(_)
+            | Message::SetMessageActions(_) => {
                 let Some(handler) = &self.config_handler else {
                     return Task::none();
                 };
@@ -247,6 +264,12 @@ impl cosmic::Application for AppModel {
                 let result = match message {
                     Message::SetLoadRemoteImages(enabled) => {
                         config.set_load_remote_images(handler, enabled)
+                    }
+                    Message::SetShowSenderPictures(enabled) => {
+                        config.set_show_recipient_pictures(handler, enabled)
+                    }
+                    Message::SetFetchSenderPhotos(enabled) => {
+                        config.set_fetch_sender_photos(handler, enabled)
                     }
                     Message::SetMessageActions(index) => {
                         let Some(&style) = MessageActions::ALL.get(index) else {
@@ -262,6 +285,11 @@ impl cosmic::Application for AppModel {
                 }
             }
             Message::ConfigUpdated(config) => self.apply_config(config),
+            Message::SenderPhoto(address, photo) => {
+                if self.sender_photos().is_some() {
+                    self.avatars.save(address, photo);
+                }
+            }
         }
         Task::none()
     }
@@ -269,7 +297,12 @@ impl cosmic::Application for AppModel {
     fn view(&self) -> Element<'_, Message> {
         let list = || {
             self.mailbox
-                .view(self.search.query(), self.composer.has_draft())
+                .view(
+                    self.search.query(),
+                    self.composer.has_draft(),
+                    self.config.show_recipient_pictures,
+                    self.sender_photos(),
+                )
                 .map(Message::List)
         };
         let reader = || {
@@ -278,7 +311,8 @@ impl cosmic::Application for AppModel {
                     self.mailbox.selected(),
                     self.mailbox.folder(),
                     self.narrow,
-                    self.config.message_actions,
+                    &self.config,
+                    self.sender_photos(),
                 )
                 .map(Message::Reader)
         };
@@ -326,6 +360,11 @@ impl cosmic::Application for AppModel {
 }
 
 impl AppModel {
+    fn sender_photos(&self) -> Option<&Avatars> {
+        (self.config.show_recipient_pictures && self.config.fetch_sender_photos)
+            .then_some(&self.avatars)
+    }
+
     fn settings(&self) -> Element<'_, Message> {
         let mut preferences = widget::settings::section().title(fl!("mail-display")).add(
             widget::settings::item::builder(fl!("mail-show-remote-images")).control(
@@ -346,6 +385,28 @@ impl AppModel {
                 Message::SetMessageActions,
             )),
         );
+        preferences = preferences.add(
+            widget::settings::item::builder(fl!("show-sender-pictures")).control(
+                widget::toggler(self.config.show_recipient_pictures).on_toggle_maybe(
+                    self.config_handler
+                        .as_ref()
+                        .map(|_| Message::SetShowSenderPictures),
+                ),
+            ),
+        );
+        preferences = preferences
+            .add(
+                widget::settings::item::builder(fl!("fetch-sender-photos")).control(
+                    widget::toggler(self.config.fetch_sender_photos).on_toggle_maybe(
+                        self.config_handler
+                            .as_ref()
+                            .map(|_| Message::SetFetchSenderPhotos),
+                    ),
+                ),
+            )
+            .add(widget::text::caption(fl!(
+                "fetch-sender-photos-description"
+            )));
         if self.config_error {
             preferences = preferences.add(widget::text::body(fl!("settings-error")));
         }
@@ -457,7 +518,14 @@ impl AppModel {
                     self.reader.set_action_error(fl!("forward-draft-exists"));
                 }
             }
-            reader::Message::ToggleMore => self.reader.toggle_more(),
+            reader::Message::CopyAddress(address) => {
+                return cosmic::iced::clipboard::write(address);
+            }
+            reader::Message::ComposeTo(address) => {
+                if !self.composer.compose_to(address) {
+                    self.reader.set_action_error(fl!("forward-draft-exists"));
+                }
+            }
             reader::Message::Change(change) => {
                 let Some(mail) = self.mailbox.selected() else {
                     return Task::none();

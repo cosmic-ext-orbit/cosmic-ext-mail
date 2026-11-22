@@ -6,7 +6,7 @@ mod model;
 pub mod remote;
 
 pub use list::Message;
-pub use model::{Folder, Mail, MailId};
+pub use model::{Contact, Folder, Mail, MailId};
 
 use cosmic::iced::{
     futures::{StreamExt, stream},
@@ -253,6 +253,12 @@ impl Mailbox {
         self.matching_messages(query).take(VISIBLE_MESSAGE_LIMIT)
     }
 
+    pub fn visible_sender_addresses<'a>(&'a self, query: &'a str) -> impl Iterator<Item = &'a str> {
+        self.visible_messages(query)
+            .map(|(_, mail)| mail.address.as_str())
+            .chain(self.selected().map(|mail| mail.address.as_str()))
+    }
+
     pub fn set_sort_order(&mut self, order: SortOrder) -> cosmic::Task<Message> {
         if self.sort_order == order {
             return cosmic::Task::none();
@@ -319,22 +325,23 @@ mod tests {
                 flagged: false,
                 sender: String::new(),
                 address: String::new(),
+                recipients: None,
                 subject: subject.into(),
                 time: String::new(),
                 timestamp: 3 - index as i64,
             })
             .collect();
-        let mut state = Tree::new(mailbox.view("", false).as_widget());
+        let mut state = Tree::new(mailbox.view("", false, false, None).as_widget());
 
-        for (query, order, expected) in [
-            ("Match", SortOrder::NewestFirst, &[1, 2][..]),
-            ("Match", SortOrder::OldestFirst, &[2, 1][..]),
-            ("Nothing", SortOrder::OldestFirst, &[][..]),
-            ("", SortOrder::OldestFirst, &[2, 1, 0][..]),
+        for (query, order, pictures, expected) in [
+            ("Match", SortOrder::NewestFirst, false, &[1, 2][..]),
+            ("Match", SortOrder::OldestFirst, true, &[2, 1][..]),
+            ("Nothing", SortOrder::OldestFirst, true, &[][..]),
+            ("", SortOrder::OldestFirst, false, &[2, 1, 0][..]),
         ] {
             let _ = mailbox.set_sort_order(order);
             tree::NAMED.with(|named| *named.borrow_mut() = state.take_all_named());
-            state.diff(mailbox.view(query, false).as_widget_mut());
+            state.diff(mailbox.view(query, false, pictures, None).as_widget_mut());
             tree::NAMED.with(|named| named.borrow_mut().clear());
 
             assert!(

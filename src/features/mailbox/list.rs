@@ -21,7 +21,13 @@ pub enum Message {
 }
 
 impl Mailbox {
-    pub fn view<'a>(&'a self, query: &'a str, has_draft: bool) -> Element<'a, Message> {
+    pub fn view<'a>(
+        &'a self,
+        query: &'a str,
+        has_draft: bool,
+        show_sender_pictures: bool,
+        photos: Option<&crate::features::avatars::Avatars>,
+    ) -> Element<'a, Message> {
         let mut rows = widget::column::with_capacity(self.contents.failures.len() + 3).spacing(4);
         if self.folder == Folder::Drafts && has_draft {
             rows = rows
@@ -69,7 +75,7 @@ impl Mailbox {
                     };
                     let line = widget::row::with_capacity(2)
                         .push(widget::text::body(sender).width(Length::Fill))
-                        .push(widget::text::caption(mail.time.as_str()));
+                        .push(widget::text::caption(mail.display_time()));
                     let subject = if mail.unread {
                         widget::text::body(mail.subject.as_str()).font(cosmic::font::bold())
                     } else {
@@ -80,6 +86,19 @@ impl Mailbox {
                         .push(subject)
                         .push(widget::text::caption(mail.account_email.as_str()))
                         .spacing(3);
+                    let row: Element<_> = if show_sender_pictures {
+                        widget::row::with_capacity(2)
+                            .spacing(8)
+                            .align_y(cosmic::iced::Alignment::Center)
+                            .push(mail.sender_picture(
+                                28.0,
+                                photos.and_then(|photos| photos.get(&mail.address)),
+                            ))
+                            .push(row)
+                            .into()
+                    } else {
+                        row.into()
+                    };
                     messages = messages.push(
                         widget::button::custom(row)
                             .id(self.row_ids[position].clone())

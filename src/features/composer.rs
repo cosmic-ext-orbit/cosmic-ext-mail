@@ -48,6 +48,18 @@ impl Composer {
         self.open = self.draft.is_some();
     }
 
+    pub fn compose_to(&mut self, address: String) -> bool {
+        if self.draft.is_some() {
+            return false;
+        }
+        self.draft = Some(Draft {
+            to: address,
+            ..Draft::default()
+        });
+        self.open = true;
+        true
+    }
+
     pub fn forward(&mut self, mail: &Mail, text: &str) -> bool {
         if self.draft.is_some() {
             return false;

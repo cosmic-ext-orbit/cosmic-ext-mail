@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use crate::fl;
+use chrono::{Local, TimeZone};
+use cosmic::{Element, widget};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -64,12 +66,91 @@ pub struct Mail {
     pub flagged: bool,
     pub sender: String,
     pub address: String,
+    #[serde(default)]
+    pub recipients: Option<Vec<Contact>>,
     pub subject: String,
     pub time: String,
     pub timestamp: i64,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct Contact {
+    pub name: String,
+    pub address: String,
+}
+
+impl Contact {
+    pub fn from_list(addresses: mail_parser::AddressList<'_>) -> Vec<Self> {
+        addresses
+            .mailboxes()
+            .filter_map(|mailbox| {
+                let name = mailbox.name().unwrap_or_default();
+                let address = mailbox.address().unwrap_or_default();
+                (!name.is_empty() || !address.is_empty()).then(|| Self {
+                    name: name.to_owned(),
+                    address: address.to_owned(),
+                })
+            })
+            .collect()
+    }
+}
+
 impl Mail {
+    pub fn display_time(&self) -> String {
+        let Some(date) = Local.timestamp_opt(self.timestamp, 0).single() else {
+            return self.time.clone();
+        };
+        let format = if date.date_naive() == Local::now().date_naive() {
+            "%H:%M"
+        } else {
+            "%Y-%m-%d"
+        };
+        date.format(format).to_string()
+    }
+
+    pub fn sender_picture<'a, Message: 'a>(
+        &self,
+        size: f32,
+        photo: Option<&cosmic::iced::widget::image::Handle>,
+    ) -> Element<'a, Message> {
+        if let Some(photo) = photo {
+            return cosmic::iced::widget::image(photo.clone())
+                .width(size)
+                .height(size)
+                .border_radius(size / 2.0)
+                .into();
+        }
+        let name = if self.sender.is_empty() {
+            &self.address
+        } else {
+            &self.sender
+        };
+        let initials: String = name
+            .split_whitespace()
+            .filter_map(|word| word.chars().find(|character| character.is_alphanumeric()))
+            .take(2)
+            .flat_map(char::to_uppercase)
+            .collect();
+        let label = if initials.is_empty() {
+            "?".into()
+        } else {
+            initials
+        };
+        widget::container(widget::text::caption(label))
+            .center_x(size)
+            .center_y(size)
+            .class(cosmic::theme::Container::custom(move |theme| {
+                let component = &theme.cosmic().accent;
+                cosmic::iced::widget::container::Style {
+                    background: Some(cosmic::iced::Color::from(component.base).into()),
+                    text_color: Some(component.on.into()),
+                    border: cosmic::iced::Border::default().rounded(size / 2.0),
+                    ..Default::default()
+                }
+            }))
+            .into()
+    }
+
     pub fn matches(&self, query: &str) -> bool {
         let mut words = query.split_whitespace().peekable();
         if words.peek().is_none() {

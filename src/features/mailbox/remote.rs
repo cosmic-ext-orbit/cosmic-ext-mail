@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use super::{
-    Folder, Mail, MailId,
+    Contact, Folder, Mail, MailId,
     cache::{self, Cache, Snapshot},
 };
 use crate::{
@@ -262,7 +262,12 @@ fn sync_headers(
     let missing: Vec<_> = uids
         .iter()
         .copied()
-        .filter(|uid| current.contains_key(uid) && !headers.contains_key(uid))
+        .filter(|uid| {
+            current.contains_key(uid)
+                && headers
+                    .get(uid)
+                    .is_none_or(|mail| mail.recipients.is_none())
+        })
         .collect();
     for batch in missing.chunks(HEADER_BATCH_SIZE) {
         let fetched = session
@@ -303,6 +308,13 @@ fn sync_headers(
                         .or_else(|| (!address.is_empty()).then_some(address))
                         .map_or_else(|| fl!("mail-unknown-sender"), str::to_owned),
                     address: address.to_owned(),
+                    recipients: Some(
+                        header
+                            .as_ref()
+                            .and_then(|header| header.to())
+                            .map(Contact::from_list)
+                            .unwrap_or_default(),
+                    ),
                     subject: header
                         .as_ref()
                         .and_then(|header| header.subject())

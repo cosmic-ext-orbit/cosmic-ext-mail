@@ -26,7 +26,6 @@ select-message = Select a message
 folder-empty = No messages
 no-results = No matching messages
 recipient = To
-mail-to = To { $recipients }
 subject = Subject
 save-draft = Save draft
 resume-draft = Resume draft
@@ -115,3 +114,8 @@ forwarded-message =
     Subject: { $subject }
 
     { $body }
+show-sender-pictures = Show sender pictures
+copy-email-address = Copy email address
+compose-to-address = Compose new message
+fetch-sender-photos = Look up sender photos on Gravatar
+fetch-sender-photos-description = When sender pictures are shown, sends a hash of each sender’s email address to Gravatar to look up their photo.
