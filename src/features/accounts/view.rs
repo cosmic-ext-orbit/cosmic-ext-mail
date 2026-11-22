@@ -9,21 +9,12 @@ use crate::fl;
 use super::{Accounts, Field, Form, Message, Password, Screen, Status};
 
 impl Accounts {
-    pub fn button(&self) -> Element<'_, Message> {
-        widget::button::icon(widget::icon::from_name("preferences-system-symbolic"))
-            .on_press(Message::Open)
-            .tooltip(fl!("accounts"))
-            .into()
-    }
-
-    pub fn dialog(&self) -> Option<Element<'_, Message>> {
-        let view = match &self.screen {
-            Screen::Closed => return None,
+    pub fn view(&self) -> Element<'_, Message> {
+        match &self.screen {
             Screen::List => self.list(),
             Screen::Edit(form) => self.edit(form),
             Screen::ConfirmRemove(id) => self.confirm(*id),
-        };
-        Some(view)
+        }
     }
 
     fn list(&self) -> Element<'_, Message> {
@@ -36,11 +27,13 @@ impl Accounts {
                 widget::row::with_capacity(3)
                     .push(widget::text::body(account.email.as_str()).width(Length::Fill))
                     .push(
-                        widget::button::text(fl!("account-edit"))
+                        widget::button::icon(widget::icon::from_name("edit-symbolic"))
+                            .tooltip(fl!("account-edit"))
                             .on_press(Message::Edit(account.id)),
                     )
                     .push(
-                        widget::button::text(fl!("account-remove"))
+                        widget::button::icon(widget::icon::from_name("user-trash-symbolic"))
+                            .tooltip(fl!("account-remove"))
                             .on_press(Message::ConfirmRemove(account.id)),
                     )
                     .spacing(4)
@@ -48,20 +41,12 @@ impl Accounts {
             );
         }
 
-        widget::dialog()
+        widget::settings::section()
             .title(fl!("accounts"))
-            .control(
-                widget::container(
-                    widget::scrollable(rows.push(self.status_text())).height(Length::Shrink),
-                )
-                .max_height(320),
-            )
-            .primary_action(
+            .add(rows.push(self.status_text()))
+            .add(
                 widget::button::suggested(fl!("account-add"))
                     .on_press_maybe(self.store.is_ok().then_some(Message::Add)),
-            )
-            .secondary_action(
-                widget::button::standard(fl!("account-close")).on_press(Message::Close),
             )
             .into()
     }
@@ -118,27 +103,27 @@ impl Accounts {
             )
             .push(self.status_text())
             .spacing(10);
-        widget::dialog()
+        widget::settings::section()
             .title(if form.id.is_some() {
                 fl!("account-edit")
             } else {
                 fl!("account-add")
             })
-            .control(
-                widget::container(widget::scrollable(fields).height(Length::Shrink))
-                    .max_height(410),
-            )
-            .primary_action(
-                widget::button::suggested(fl!("account-save"))
-                    .on_press_maybe(editable.then_some(Message::Save)),
-            )
-            .secondary_action(
-                widget::button::standard(fl!("account-back"))
-                    .on_press_maybe(editable.then_some(Message::Back)),
-            )
-            .tertiary_action(
-                widget::button::text(fl!("account-check"))
-                    .on_press_maybe(editable.then_some(Message::Check)),
+            .add(fields)
+            .add(
+                widget::row::with_children([
+                    widget::button::standard(fl!("account-back"))
+                        .on_press_maybe(editable.then_some(Message::Back))
+                        .into(),
+                    widget::button::text(fl!("account-check"))
+                        .on_press_maybe(editable.then_some(Message::Check))
+                        .into(),
+                    widget::button::suggested(fl!("account-save"))
+                        .on_press_maybe(editable.then_some(Message::Save))
+                        .into(),
+                ])
+                .spacing(8)
+                .wrap(),
             )
             .into()
     }
@@ -150,17 +135,23 @@ impl Accounts {
             .find(|account| account.id == id)
             .map_or("", |account| account.email.as_str());
         let editable = !self.is_busy();
-        widget::dialog()
+        widget::settings::section()
             .title(fl!("account-remove"))
-            .body(fl!("account-remove-confirm", email = email))
-            .control(self.status_text())
-            .primary_action(
-                widget::button::destructive(fl!("account-remove"))
-                    .on_press_maybe(editable.then_some(Message::Remove(id))),
-            )
-            .secondary_action(
-                widget::button::standard(fl!("account-back"))
-                    .on_press_maybe(editable.then_some(Message::Back)),
+            .add(widget::text::body(fl!(
+                "account-remove-confirm",
+                email = email
+            )))
+            .add(self.status_text())
+            .add(
+                widget::row::with_children([
+                    widget::button::standard(fl!("account-back"))
+                        .on_press_maybe(editable.then_some(Message::Back))
+                        .into(),
+                    widget::button::destructive(fl!("account-remove"))
+                        .on_press_maybe(editable.then_some(Message::Remove(id)))
+                        .into(),
+                ])
+                .spacing(8),
             )
             .into()
     }

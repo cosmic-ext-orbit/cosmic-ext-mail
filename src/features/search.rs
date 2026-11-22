@@ -4,7 +4,7 @@ use crate::fl;
 use cosmic::{Element, Task, widget};
 
 #[derive(Clone, Debug)]
-pub enum SearchMessage {
+pub enum Message {
     Changed(String),
     Focus,
     Submit,
@@ -35,16 +35,16 @@ impl Search {
         self.query.clear();
     }
 
-    pub fn focus(&self) -> Task<SearchMessage> {
+    pub fn focus(&self) -> Task<Message> {
         widget::text_input::focus(self.id.clone())
     }
 
-    pub fn view(&self, narrow: bool) -> Element<'_, SearchMessage> {
+    pub fn view(&self, narrow: bool) -> Element<'_, Message> {
         widget::search_input(fl!("search-mail"), self.query.as_str())
             .id(self.id.clone())
             .width(if narrow { 155 } else { 280 })
-            .on_input(SearchMessage::Changed)
-            .on_submit(|_| SearchMessage::Submit)
+            .on_input(Message::Changed)
+            .on_submit(|_| Message::Submit)
             .into()
     }
 }

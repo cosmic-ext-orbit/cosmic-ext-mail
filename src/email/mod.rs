@@ -34,6 +34,13 @@ pub struct EmailView {
 impl EmailView {
     /// Creates a pane on the COSMIC application's UI thread. Panes share one Servo runtime.
     pub fn new(body: EmailBody<'_>) -> Result<Self, String> {
+        Self::new_with_remote_images(body, false)
+    }
+
+    pub fn new_with_remote_images(
+        body: EmailBody<'_>,
+        remote_images: bool,
+    ) -> Result<Self, String> {
         let html = body.into_html()?;
         let context = Rc::new(
             SoftwareRenderingContext::new((640_u32, 420_u32).into()).map_err(|error| {
@@ -45,7 +52,7 @@ impl EmailView {
             .map_err(|error| format!("{error:?}"))?;
         let runtime = Runtime::shared();
         let url = runtime.message_url();
-        let delegate = Rc::new(Delegate::new(url.clone(), html));
+        let delegate = Rc::new(Delegate::new(url.clone(), html, remote_images));
         let webview = WebViewBuilder::new(&runtime.servo, context.clone())
             .url(url)
             .delegate(delegate.clone())
@@ -67,18 +74,32 @@ impl EmailView {
 
     /// Replaces the content without restarting Servo. Parse failures leave the current message intact.
     pub fn set_body(&mut self, body: EmailBody<'_>) -> Result<(), String> {
+        self.set_body_with_remote_images(body, false)
+    }
+
+    pub fn set_body_with_remote_images(
+        &mut self,
+        body: EmailBody<'_>,
+        remote_images: bool,
+    ) -> Result<(), String> {
         let html = body.into_html()?;
         let url = self.runtime.message_url();
-        self.delegate.replace_document(url.clone(), html);
+        self.delegate
+            .replace_document(url.clone(), html, remote_images);
         self.load(url);
         Ok(())
     }
 
     /// Allows external images for the current message and reloads it.
     pub fn show_remote_images(&mut self) {
-        if !self.remote_images_enabled() {
+        self.set_remote_images(true);
+    }
+
+    /// Updates the external image policy and reloads the current message if it changed.
+    pub fn set_remote_images(&mut self, enabled: bool) {
+        if enabled != self.remote_images_enabled() {
             let url = self.runtime.message_url();
-            self.delegate.enable_remote_images(url.clone());
+            self.delegate.set_remote_images(url.clone(), enabled);
             self.load(url);
         }
     }

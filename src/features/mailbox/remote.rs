@@ -29,6 +29,8 @@ pub enum Error {
     Fetch,
     MessageUnavailable,
     MessageTooLarge,
+    DestinationUnavailable,
+    ChangeFailed,
 }
 
 impl From<accounts::Error> for Error {
@@ -45,6 +47,8 @@ impl Error {
             Self::Fetch => fl!("mail-fetch-failed"),
             Self::MessageUnavailable => fl!("mail-unavailable"),
             Self::MessageTooLarge => fl!("mail-too-large"),
+            Self::DestinationUnavailable => fl!("mail-destination-unavailable"),
+            Self::ChangeFailed => fl!("mail-change-failed"),
         }
     }
 }
@@ -239,7 +243,14 @@ fn sync_headers(
             .uid_fetch(uid_set(batch.iter().copied()), "(UID FLAGS RFC822.SIZE)")
             .map_err(|_| Error::Fetch)?;
         current.extend(flags.iter().filter_map(|item| {
-            Some((item.uid?, (!item.flags().contains(&Flag::Seen), item.size)))
+            Some((
+                item.uid?,
+                (
+                    !item.flags().contains(&Flag::Seen),
+                    item.flags().contains(&Flag::Flagged),
+                    item.size,
+                ),
+            ))
         }));
     }
     let mut headers = previous
@@ -284,6 +295,7 @@ fn sync_headers(
                     },
                     account_email: account.email.clone(),
                     unread: false,
+                    flagged: false,
                     sender: from
                         .as_ref()
                         .and_then(|from| from.name())
@@ -308,9 +320,10 @@ fn sync_headers(
     let messages = uids
         .into_iter()
         .filter_map(|uid| {
-            let (unread, size) = current.remove(&uid)?;
+            let (unread, flagged, size) = current.remove(&uid)?;
             let mut mail = headers.remove(&uid)?;
             mail.unread = unread;
+            mail.flagged = flagged;
             sizes.insert(uid, size);
             Some(mail)
         })
@@ -377,6 +390,7 @@ fn folder_name<'a>(
         Folder::Drafts => ("\\Drafts", &["Drafts", "Draft"]),
         Folder::Sent => ("\\Sent", &["Sent", "Sent Mail", "Sent Items"]),
         Folder::Archive => ("\\Archive", &["Archive", "Archives"]),
+        Folder::Junk => ("\\Junk", &["Junk", "Spam", "Junk Email"]),
         Folder::Trash => ("\\Trash", &["Trash", "Deleted Items", "Deleted Messages"]),
         Folder::Inbox => return Some("INBOX"),
     };
@@ -407,6 +421,58 @@ fn folder_name<'a>(
                 .map(|(_, name)| name)
         })
         .map(Name::name)
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum Change {
+    Move(Folder),
+    Seen(bool),
+    Flagged(bool),
+}
+
+pub async fn change(account: Account, id: MailId, change: Change) -> Result<(), Error> {
+    accounts::with_imap_session(account, move |session| {
+        let mailbox = session.select(&id.folder).map_err(|_| Error::Folder)?;
+        if mailbox.uid_validity != Some(id.uid_validity) {
+            return Err(Error::MessageUnavailable);
+        }
+        let uid = id.uid.to_string();
+        match change {
+            Change::Move(folder) => {
+                let names = session
+                    .list(Some(""), Some("*"))
+                    .map_err(|_| Error::DestinationUnavailable)?;
+                let destination = folder_name(names.iter(), folder)
+                    .filter(|name| *name != id.folder)
+                    .ok_or(Error::DestinationUnavailable)?;
+                session
+                    .uid_mv(uid, destination)
+                    .map_err(|_| Error::ChangeFailed)?;
+            }
+            Change::Seen(seen) => {
+                let command = if seen {
+                    "+FLAGS.SILENT (\\Seen)"
+                } else {
+                    "-FLAGS.SILENT (\\Seen)"
+                };
+                session
+                    .uid_store(uid, command)
+                    .map_err(|_| Error::ChangeFailed)?;
+            }
+            Change::Flagged(flagged) => {
+                let command = if flagged {
+                    "+FLAGS.SILENT (\\Flagged)"
+                } else {
+                    "-FLAGS.SILENT (\\Flagged)"
+                };
+                session
+                    .uid_store(uid, command)
+                    .map_err(|_| Error::ChangeFailed)?;
+            }
+        }
+        Ok(())
+    })
+    .await
 }
 
 pub async fn body(account: Account, id: MailId) -> Result<Arc<[u8]>, Error> {

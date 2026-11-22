@@ -9,6 +9,8 @@ use super::{Account, Error, Password, store};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
+type Session = imap::Session<native_tls::TlsStream<TcpStream>>;
+
 pub(super) async fn check(account: Account, password: Password) -> Result<(), Error> {
     let password = if password.0.is_empty() {
         store::stored_password(account.id).await?
@@ -24,8 +26,6 @@ pub(super) async fn check(account: Account, password: Password) -> Result<(), Er
         .map_err(|_| Error::ConnectionTimeout)?
         .map_err(|_| Error::ConnectionTask)?
 }
-
-type Session = imap::Session<native_tls::TlsStream<TcpStream>>;
 
 pub(in crate::features) async fn with_imap<T, E>(
     account: Account,

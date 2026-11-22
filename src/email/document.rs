@@ -96,7 +96,7 @@ impl WebViewDelegate for Delegate {
     }
 
     fn notify_load_status_changed(&self, _: WebView, status: LoadStatus) {
-        if matches!(status, LoadStatus::Complete) {
+        if matches!(status, LoadStatus::HeadParsed | LoadStatus::Complete) {
             self.frame_ready.set(true);
         }
     }
@@ -113,12 +113,12 @@ impl ClipboardDelegate for Delegate {
 }
 
 impl Delegate {
-    pub(super) fn new(url: Url, html: String) -> Self {
+    pub(super) fn new(url: Url, html: String, remote_images: bool) -> Self {
         Self {
             document: RefCell::new(Document {
                 url,
                 html,
-                remote_images: false,
+                remote_images,
             }),
             frame_ready: Cell::new(false),
             copied: RefCell::new(None),
@@ -126,11 +126,11 @@ impl Delegate {
         }
     }
 
-    pub(super) fn replace_document(&self, url: Url, html: String) {
+    pub(super) fn replace_document(&self, url: Url, html: String, remote_images: bool) {
         *self.document.borrow_mut() = Document {
             url,
             html,
-            remote_images: false,
+            remote_images,
         };
         self.frame_ready.set(false);
         self.copied.borrow_mut().take();
@@ -140,16 +140,19 @@ impl Delegate {
         self.document.borrow().remote_images
     }
 
-    pub(super) fn enable_remote_images(&self, url: Url) {
+    pub(super) fn set_remote_images(&self, url: Url, enabled: bool) {
         let mut document = self.document.borrow_mut();
         document.url = url;
-        document.remote_images = true;
+        document.remote_images = enabled;
         self.frame_ready.set(false);
         self.copied.borrow_mut().take();
     }
 
     pub(super) fn document_is_ready(&self, webview: &WebView) -> bool {
         webview.url().as_ref() == Some(&self.document.borrow().url)
-            && matches!(webview.load_status(), LoadStatus::Complete)
+            && matches!(
+                webview.load_status(),
+                LoadStatus::HeadParsed | LoadStatus::Complete
+            )
     }
 }

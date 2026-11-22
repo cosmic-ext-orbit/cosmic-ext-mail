@@ -5,7 +5,7 @@ mod list;
 mod model;
 pub mod remote;
 
-pub use list::ListMessage;
+pub use list::Message;
 pub use model::{Folder, Mail, MailId};
 
 use cosmic::iced::{
@@ -19,6 +19,7 @@ const VISIBLE_MESSAGE_LIMIT: usize = 500;
 pub struct Mailbox {
     nav: nav_bar::Model,
     folder: Folder,
+    sort_order: SortOrder,
     selected: Option<usize>,
     list_id: widget::Id,
     list_offset: f32,
@@ -27,6 +28,24 @@ pub struct Mailbox {
     downloads: Downloads,
     status: Status,
     contents: remote::FolderContents,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SortOrder {
+    #[default]
+    NewestFirst,
+    OldestFirst,
+}
+
+impl SortOrder {
+    const ALL: [Self; 2] = [Self::NewestFirst, Self::OldestFirst];
+
+    fn label(self) -> String {
+        match self {
+            Self::NewestFirst => crate::fl!("mail-sort-newest-first"),
+            Self::OldestFirst => crate::fl!("mail-sort-oldest-first"),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -60,6 +79,7 @@ impl Mailbox {
         Self {
             nav,
             folder: Folder::Inbox,
+            sort_order: SortOrder::default(),
             selected: None,
             list_id: widget::Id::unique(),
             list_offset: 0.0,
@@ -74,12 +94,27 @@ impl Mailbox {
     pub fn reload(
         &mut self,
         accounts: &crate::features::accounts::Accounts,
-    ) -> cosmic::Task<ListMessage> {
+    ) -> cosmic::Task<Message> {
+        self.selected = None;
+        self.contents = remote::FolderContents::default();
+        self.start_sync(accounts, true)
+    }
+
+    pub fn refresh_after_change(
+        &mut self,
+        accounts: &crate::features::accounts::Accounts,
+    ) -> cosmic::Task<Message> {
+        self.start_sync(accounts, false)
+    }
+
+    fn start_sync(
+        &mut self,
+        accounts: &crate::features::accounts::Accounts,
+        show_cached: bool,
+    ) -> cosmic::Task<Message> {
         self.request += 1;
         self.syncing = false;
         self.downloads = Downloads::default();
-        self.selected = None;
-        self.contents = remote::FolderContents::default();
         let saved = match accounts.saved() {
             Ok([]) => {
                 self.status = Status::NoAccounts;
@@ -91,7 +126,9 @@ impl Mailbox {
                 return cosmic::Task::none();
             }
         };
-        self.status = Status::Loading;
+        if show_cached {
+            self.status = Status::Loading;
+        }
         self.syncing = true;
         let request = self.request;
         let (send, receive) = tokio::sync::mpsc::unbounded_channel();
@@ -99,16 +136,21 @@ impl Mailbox {
             receive.recv().await.map(|event| (Some(event), receive))
         })
         .chain(stream::once(async { None }));
-        cosmic::Task::perform(
-            remote::cached(saved.clone(), self.folder),
-            move |contents| ListMessage::Cached(request, contents),
-        )
-        .chain(cosmic::Task::batch([
+        let cached = if show_cached {
+            cosmic::Task::perform(
+                remote::cached(saved.clone(), self.folder),
+                move |contents| Message::Cached(request, contents),
+            )
+        } else {
+            cosmic::Task::none()
+        };
+        let sync = cosmic::Task::batch([
             cosmic::Task::perform(remote::load(saved, self.folder, send), move |contents| {
-                ListMessage::Loaded(request, contents)
+                Message::Loaded(request, contents)
             }),
-            cosmic::Task::run(progress, move |event| ListMessage::Download(request, event)),
-        ]))
+            cosmic::Task::run(progress, move |event| Message::Download(request, event)),
+        ]);
+        cached.chain(sync)
     }
 
     pub fn update_download(&mut self, request: u64, event: Option<remote::DownloadEvent>) {
@@ -163,6 +205,10 @@ impl Mailbox {
         true
     }
 
+    pub fn folder(&self) -> Folder {
+        self.folder
+    }
+
     pub fn selected(&self) -> Option<&Mail> {
         self.selected.and_then(|id| self.contents.messages.get(id))
     }
@@ -189,7 +235,7 @@ impl Mailbox {
         self.list_offset = offset;
     }
 
-    pub fn restore_list_position(&mut self) -> cosmic::Task<ListMessage> {
+    pub fn restore_list_position(&mut self) -> cosmic::Task<Message> {
         let scroll = self.scroll_to(self.list_offset);
         let focus = self.selected.map_or_else(cosmic::Task::none, |id| {
             widget::button::focus(message_row_id(id))
@@ -201,11 +247,24 @@ impl Mailbox {
         self.matching_messages(query).take(VISIBLE_MESSAGE_LIMIT)
     }
 
+    pub fn set_sort_order(&mut self, order: SortOrder) -> cosmic::Task<Message> {
+        if self.sort_order == order {
+            return cosmic::Task::none();
+        }
+        self.sort_order = order;
+        self.scroll_to(0.0)
+    }
+
     fn matching_messages<'a>(&'a self, query: &'a str) -> impl Iterator<Item = (usize, &'a Mail)> {
-        self.contents
-            .messages
-            .iter()
-            .enumerate()
+        let messages = &self.contents.messages;
+        (0..messages.len())
+            .map(move |position| {
+                let index = match self.sort_order {
+                    SortOrder::NewestFirst => position,
+                    SortOrder::OldestFirst => messages.len() - 1 - position,
+                };
+                (index, &messages[index])
+            })
             .filter(move |(_, mail)| mail.matches(query))
     }
 
@@ -218,7 +277,7 @@ impl Mailbox {
         Some(ids[index])
     }
 
-    pub fn scroll_to(&mut self, offset: f32) -> cosmic::Task<ListMessage> {
+    pub fn scroll_to(&mut self, offset: f32) -> cosmic::Task<Message> {
         self.list_offset = offset;
         scrollable::scroll_to(
             self.list_id.clone(),

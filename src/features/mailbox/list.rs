@@ -1,18 +1,21 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-use super::{Downloads, Folder, Mailbox, Status, VISIBLE_MESSAGE_LIMIT, message_row_id, remote};
+use super::{
+    Downloads, Folder, Mailbox, SortOrder, Status, VISIBLE_MESSAGE_LIMIT, message_row_id, remote,
+};
 use crate::fl;
 use cosmic::iced::Length;
 use cosmic::{Element, widget};
 
 #[derive(Clone, Debug)]
-pub enum ListMessage {
+pub enum Message {
     Select(usize),
     Step(isize),
     OpenSelected,
     Scrolled(f32),
     ResumeDraft,
     Refresh,
+    Sort(SortOrder),
     AddAccount,
     Cached(u64, Option<remote::FolderContents>),
     Loaded(u64, remote::FolderContents),
@@ -20,19 +23,18 @@ pub enum ListMessage {
 }
 
 impl Mailbox {
-    pub fn view<'a>(&'a self, query: &'a str, has_draft: bool) -> Element<'a, ListMessage> {
+    pub fn view<'a>(&'a self, query: &'a str, has_draft: bool) -> Element<'a, Message> {
         let mut rows =
             widget::column::with_capacity(self.contents.messages.len().min(VISIBLE_MESSAGE_LIMIT))
                 .spacing(4);
         if self.folder == Folder::Drafts && has_draft {
-            rows = rows.push(
-                widget::button::standard(fl!("resume-draft")).on_press(ListMessage::ResumeDraft),
-            );
+            rows = rows
+                .push(widget::button::standard(fl!("resume-draft")).on_press(Message::ResumeDraft));
         }
         match self.status {
             Status::NoAccounts => {
                 rows = rows.push(widget::text::body(fl!("mail-no-accounts"))).push(
-                    widget::button::standard(fl!("account-add")).on_press(ListMessage::AddAccount),
+                    widget::button::standard(fl!("account-add")).on_press(Message::AddAccount),
                 );
             }
             Status::Loading => rows = rows.push(widget::text::body(fl!("mail-loading"))),
@@ -83,7 +85,7 @@ impl Mailbox {
                             .width(Length::Fill)
                             .padding(10)
                             .selected(self.selected == Some(id))
-                            .on_press(ListMessage::Select(id)),
+                            .on_press(Message::Select(id)),
                     );
                 }
                 if matches.peek().is_some() {
@@ -94,13 +96,24 @@ impl Mailbox {
                 }
             }
         }
-        let header = widget::row::with_capacity(2)
+        let sort_index = SortOrder::ALL
+            .iter()
+            .position(|&order| order == self.sort_order);
+        let header = widget::row::with_capacity(3)
+            .spacing(8)
             .push(widget::text::title3(self.folder.label()).width(Length::Fill))
+            .push(widget::dropdown(
+                SortOrder::ALL.map(SortOrder::label).to_vec(),
+                sort_index,
+                |index| Message::Sort(SortOrder::ALL[index]),
+            ))
             .push(
-                widget::button::text(fl!("mail-refresh")).on_press_maybe(
-                    (!self.syncing && matches!(self.status, Status::Loaded))
-                        .then_some(ListMessage::Refresh),
-                ),
+                widget::button::icon(widget::icon::from_name("view-refresh-symbolic"))
+                    .tooltip(fl!("mail-refresh"))
+                    .on_press_maybe(
+                        (!self.syncing && matches!(self.status, Status::Loaded))
+                            .then_some(Message::Refresh),
+                    ),
             )
             .align_y(cosmic::iced::Alignment::Center);
         let mut content = widget::column::with_capacity(4).push(header);
@@ -119,7 +132,7 @@ impl Mailbox {
                 widget::scrollable(rows)
                     .id(self.list_id.clone())
                     .height(Length::Fill)
-                    .on_scroll(|viewport| ListMessage::Scrolled(viewport.absolute_offset().y)),
+                    .on_scroll(|viewport| Message::Scrolled(viewport.absolute_offset().y)),
             )
             .spacing(10)
             .height(Length::Fill);

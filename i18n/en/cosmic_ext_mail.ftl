@@ -4,6 +4,9 @@ app-keywords =
 about = About
 repository = Repository
 view = View
+settings = Settings
+mail-display = Message display
+settings-error = Could not load or save app settings.
 welcome = Welcome to COSMIC! ✨
 page-id = Page { $num }
 git-description = Git commit {$hash} on {$date}
@@ -23,6 +26,7 @@ select-message = Select a message
 folder-empty = No messages
 no-results = No matching messages
 recipient = To
+mail-to = To { $recipients }
 subject = Subject
 save-draft = Save draft
 resume-draft = Resume draft
@@ -32,7 +36,6 @@ account-empty = No accounts added
 account-add = Add account
 account-edit = Edit account
 account-remove = Remove account
-account-close = Close
 account-back = Back
 account-save = Save account
 account-check = Test connection
@@ -73,6 +76,8 @@ mail-visible-limit = Showing the first { $count } results.
 mail-download-progress = Downloading messages for offline use ({ $saved } of { $total })
 mail-body-loading = Loading message…
 mail-refresh = Refresh
+mail-sort-newest-first = Newest first
+mail-sort-oldest-first = Oldest first
 mail-retry = Retry
 mail-account-failed = { $email }: { $error }
 mail-folder-failed = Could not open the folder.
@@ -82,3 +87,31 @@ mail-too-large = This message exceeds the 25 MiB preview limit.
 mail-unknown-sender = Unknown sender
 mail-no-subject = (No subject)
 mail-show-remote-images = Load remote images
+
+message-actions = Message action buttons
+message-actions-icon-only = Icon only
+message-actions-text-only = Text only
+message-actions-icon-and-text = Icon + text
+forward = Forward
+archive-message = Archive
+spam-message = Spam
+delete-message = Delete
+more-message-actions = More
+star-message = Star
+unstar-message = Unstar
+mark-message-read = Mark as read
+mark-message-unread = Mark as unread
+junk-folder = Spam
+mail-destination-unavailable = This account has no matching destination folder.
+mail-change-failed = The mail server could not apply this action.
+mail-change-working = Updating message…
+forward-draft-exists = A draft is already open or saved for this session.
+forward-subject = Fwd: { $subject }
+forwarded-message =
+
+    ---------- Forwarded message ----------
+    From: { $sender }
+    Date: { $date }
+    Subject: { $subject }
+
+    { $body }

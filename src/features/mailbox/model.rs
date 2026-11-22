@@ -10,15 +10,17 @@ pub enum Folder {
     Drafts,
     Sent,
     Archive,
+    Junk,
     Trash,
 }
 
 impl Folder {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Inbox,
         Self::Drafts,
         Self::Sent,
         Self::Archive,
+        Self::Junk,
         Self::Trash,
     ];
 
@@ -28,6 +30,7 @@ impl Folder {
             Self::Drafts => fl!("drafts"),
             Self::Sent => fl!("sent"),
             Self::Archive => fl!("archive-folder"),
+            Self::Junk => fl!("junk-folder"),
             Self::Trash => fl!("trash-folder"),
         }
     }
@@ -38,6 +41,7 @@ impl Folder {
             Self::Drafts => "document-edit-symbolic",
             Self::Sent => "mail-outbox-symbolic",
             Self::Archive => "folder-symbolic",
+            Self::Junk => "mail-mark-junk-symbolic",
             Self::Trash => "user-trash-symbolic",
         }
     }
@@ -56,6 +60,8 @@ pub struct Mail {
     pub id: MailId,
     pub account_email: String,
     pub unread: bool,
+    #[serde(default)]
+    pub flagged: bool,
     pub sender: String,
     pub address: String,
     pub subject: String,

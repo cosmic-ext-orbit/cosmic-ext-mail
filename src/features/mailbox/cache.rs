@@ -41,6 +41,7 @@ impl Cache {
             Folder::Drafts => "drafts.json",
             Folder::Sent => "sent.json",
             Folder::Archive => "archive.json",
+            Folder::Junk => "junk.json",
             Folder::Trash => "trash.json",
         })
     }

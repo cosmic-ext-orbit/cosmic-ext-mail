@@ -61,8 +61,6 @@ impl Error {
 
 #[derive(Clone, Debug)]
 pub enum Message {
-    Open,
-    Close,
     Add,
     Edit(Uuid),
     Change(Field, String),
@@ -84,7 +82,6 @@ pub enum Outcome {
 }
 
 enum Screen {
-    Closed,
     List,
     Edit(Form),
     ConfirmRemove(Uuid),
@@ -127,7 +124,7 @@ impl Accounts {
         Self {
             store,
             accounts,
-            screen: Screen::Closed,
+            screen: Screen::List,
             status: None,
         }
     }
@@ -135,10 +132,6 @@ impl Accounts {
     pub fn saved(&self) -> Result<&[Account], Error> {
         self.store.as_ref().map_err(|error| *error)?;
         Ok(&self.accounts)
-    }
-
-    pub fn is_open(&self) -> bool {
-        !matches!(self.screen, Screen::Closed)
     }
 
     fn is_busy(&self) -> bool {
@@ -169,7 +162,7 @@ impl Accounts {
 
         self.status = None;
         match message {
-            Message::Open | Message::Back => {
+            Message::Back => {
                 if let Ok(store) = &self.store {
                     match store.load() {
                         Ok(accounts) => self.accounts = accounts,
@@ -178,7 +171,6 @@ impl Accounts {
                 }
                 self.screen = Screen::List;
             }
-            Message::Close => self.screen = Screen::Closed,
             Message::Add => self.screen = Screen::Edit(Form::default()),
             Message::Edit(id) => {
                 if let Some(account) = self.accounts.iter().find(|account| account.id == id) {
