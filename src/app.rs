@@ -440,7 +440,7 @@ impl AppModel {
                 self.reader.set_open(false);
                 return self
                     .mailbox
-                    .restore_list_position()
+                    .restore_list_position(self.search.query())
                     .map(|message| Message::List(message).into());
             }
             reader::Message::ShowRemoteImages => self.reader.set_remote_images(true),

@@ -22,6 +22,8 @@ pub struct Mailbox {
     sort_order: SortOrder,
     selected: Option<usize>,
     list_id: widget::Id,
+    // Iced reconciles these buttons by position when filtering or sorting moves messages.
+    row_ids: [widget::Id; VISIBLE_MESSAGE_LIMIT],
     list_offset: f32,
     request: u64,
     syncing: bool,
@@ -82,6 +84,7 @@ impl Mailbox {
             sort_order: SortOrder::default(),
             selected: None,
             list_id: widget::Id::unique(),
+            row_ids: std::array::from_fn(|_| widget::Id::unique()),
             list_offset: 0.0,
             request: 0,
             syncing: false,
@@ -235,11 +238,14 @@ impl Mailbox {
         self.list_offset = offset;
     }
 
-    pub fn restore_list_position(&mut self) -> cosmic::Task<Message> {
+    pub fn restore_list_position(&mut self, query: &str) -> cosmic::Task<Message> {
         let scroll = self.scroll_to(self.list_offset);
-        let focus = self.selected.map_or_else(cosmic::Task::none, |id| {
-            widget::button::focus(message_row_id(id))
-        });
+        let focus = self
+            .visible_messages(query)
+            .position(|(index, _)| Some(index) == self.selected)
+            .map_or_else(cosmic::Task::none, |position| {
+                widget::button::focus(self.row_ids[position].clone())
+            });
         cosmic::Task::batch([scroll, focus])
     }
 
@@ -289,6 +295,62 @@ impl Mailbox {
     }
 }
 
-fn message_row_id(id: usize) -> widget::Id {
-    widget::Id::new(format!("message-row-{id}"))
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cosmic::iced::advanced::widget::{Tree, tree};
+
+    #[test]
+    fn filtering_and_sorting_preserve_message_button_state() {
+        let mut mailbox = Mailbox::new();
+        mailbox.status = Status::Loaded;
+        mailbox.contents.messages = ["Other", "Match one", "Match two"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, subject)| Mail {
+                id: MailId {
+                    account: uuid::Uuid::nil(),
+                    folder: "INBOX".into(),
+                    uid_validity: 1,
+                    uid: index as u32 + 1,
+                },
+                account_email: String::new(),
+                unread: false,
+                flagged: false,
+                sender: String::new(),
+                address: String::new(),
+                subject: subject.into(),
+                time: String::new(),
+                timestamp: 3 - index as i64,
+            })
+            .collect();
+        let mut state = Tree::new(mailbox.view("", false).as_widget());
+
+        for (query, order, expected) in [
+            ("Match", SortOrder::NewestFirst, &[1, 2][..]),
+            ("Match", SortOrder::OldestFirst, &[2, 1][..]),
+            ("Nothing", SortOrder::OldestFirst, &[][..]),
+            ("", SortOrder::OldestFirst, &[2, 1, 0][..]),
+        ] {
+            let _ = mailbox.set_sort_order(order);
+            tree::NAMED.with(|named| *named.borrow_mut() = state.take_all_named());
+            state.diff(mailbox.view(query, false).as_widget_mut());
+            tree::NAMED.with(|named| named.borrow_mut().clear());
+
+            assert!(
+                mailbox
+                    .visible_messages(query)
+                    .map(|(index, _)| index)
+                    .eq(expected.iter().copied())
+            );
+            for (position, id) in mailbox.row_ids.iter().take(3).enumerate() {
+                if position < expected.len() {
+                    let button = state.find(id).expect("message button");
+                    assert!(matches!(button.state, tree::State::Some(_)));
+                } else {
+                    assert!(state.find(id).is_none());
+                }
+            }
+        }
+    }
 }

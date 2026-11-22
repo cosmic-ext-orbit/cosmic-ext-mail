@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-use super::{
-    Downloads, Folder, Mailbox, SortOrder, Status, VISIBLE_MESSAGE_LIMIT, message_row_id, remote,
-};
+use super::{Downloads, Folder, Mailbox, SortOrder, Status, VISIBLE_MESSAGE_LIMIT, remote};
 use crate::fl;
 use cosmic::iced::Length;
 use cosmic::{Element, widget};
@@ -24,9 +22,7 @@ pub enum Message {
 
 impl Mailbox {
     pub fn view<'a>(&'a self, query: &'a str, has_draft: bool) -> Element<'a, Message> {
-        let mut rows =
-            widget::column::with_capacity(self.contents.messages.len().min(VISIBLE_MESSAGE_LIMIT))
-                .spacing(4);
+        let mut rows = widget::column::with_capacity(self.contents.failures.len() + 3).spacing(4);
         if self.folder == Folder::Drafts && has_draft {
             rows = rows
                 .push(widget::button::standard(fl!("resume-draft")).on_press(Message::ResumeDraft));
@@ -59,7 +55,13 @@ impl Mailbox {
                     };
                     rows = rows.push(widget::text::body(empty));
                 }
-                for (id, mail) in matches.by_ref().take(VISIBLE_MESSAGE_LIMIT) {
+                let mut messages = widget::column::with_capacity(
+                    self.contents.messages.len().min(VISIBLE_MESSAGE_LIMIT),
+                )
+                .spacing(4);
+                for (position, (id, mail)) in
+                    matches.by_ref().take(VISIBLE_MESSAGE_LIMIT).enumerate()
+                {
                     let sender = if mail.unread {
                         format!("• {}", mail.sender)
                     } else {
@@ -78,9 +80,9 @@ impl Mailbox {
                         .push(subject)
                         .push(widget::text::caption(mail.account_email.as_str()))
                         .spacing(3);
-                    rows = rows.push(
+                    messages = messages.push(
                         widget::button::custom(row)
-                            .id(message_row_id(id))
+                            .id(self.row_ids[position].clone())
                             .class(cosmic::theme::Button::ListItem([6.0; 4]))
                             .width(Length::Fill)
                             .padding(10)
@@ -88,6 +90,7 @@ impl Mailbox {
                             .on_press(Message::Select(id)),
                     );
                 }
+                rows = rows.push(messages);
                 if matches.peek().is_some() {
                     rows = rows.push(widget::text::caption(fl!(
                         "mail-visible-limit",
