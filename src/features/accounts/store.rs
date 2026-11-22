@@ -103,7 +103,7 @@ impl Store {
     }
 }
 
-pub(super) async fn stored_password(id: Uuid) -> Result<Password, Error> {
+pub(in crate::features) async fn stored_password(id: Uuid) -> Result<Password, Error> {
     let service = connect().await?;
     let bytes = read(&service, id).await?.ok_or(Error::PasswordMissing)?;
     String::from_utf8(bytes)

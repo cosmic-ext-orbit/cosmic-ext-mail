@@ -18,7 +18,7 @@ i18n-embed = { version = "0.16", features = [
 ] }
 i18n-embed-fl = "0.10"
 imap = { version = "2.4.1", default-features = false }
-lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "native-tls"] }
+lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "native-tls"] }
 native-tls = "0.2"
 lol_html = "3.0.3"
 mail-parser = { version = "1.0.1", features = ["full_encoding"] }

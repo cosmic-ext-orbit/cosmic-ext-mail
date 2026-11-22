@@ -38,6 +38,8 @@ pub struct Reader {
     request: u64,
     recipients: Vec<Contact>,
     forward_text: String,
+    reply_address: Option<String>,
+    message_id: Option<String>,
     changing: bool,
     action_error: Option<String>,
     open: bool,
@@ -58,6 +60,8 @@ impl Reader {
             request: 0,
             recipients: Vec::new(),
             forward_text: String::new(),
+            reply_address: None,
+            message_id: None,
             changing: false,
             action_error: None,
             open: false,
@@ -73,6 +77,8 @@ impl Reader {
         self.body = Body::Empty;
         self.recipients.clear();
         self.forward_text.clear();
+        self.reply_address = None;
+        self.message_id = None;
         self.action_error = None;
         let Some(mail) = mail else {
             return Task::none();
@@ -104,6 +110,16 @@ impl Reader {
         }
         let rendered = result.map_err(remote::Error::text).and_then(|bytes| {
             let message = MessageParser::new().parse(&bytes);
+            self.reply_address = message
+                .as_ref()
+                .and_then(|message| message.reply_to())
+                .and_then(|addresses| addresses.first())
+                .and_then(|mailbox| mailbox.address())
+                .map(str::to_owned);
+            self.message_id = message
+                .as_ref()
+                .and_then(|message| message.message_id())
+                .map(str::to_owned);
             if let Some(addresses) = message.as_ref().and_then(|message| message.to()) {
                 self.recipients = Contact::from_list(addresses);
             }
@@ -131,6 +147,14 @@ impl Reader {
         {
             view.set_remote_images(enabled);
         }
+    }
+
+    pub fn reply_address<'a>(&'a self, mail: &'a Mail) -> &'a str {
+        self.reply_address.as_deref().unwrap_or(&mail.address)
+    }
+
+    pub fn message_id(&self) -> Option<&str> {
+        self.message_id.as_deref()
     }
 
     pub fn forward_text(&self) -> &str {
@@ -261,7 +285,7 @@ impl Reader {
                 style,
                 "mail-reply-all-symbolic",
                 fl!("reply"),
-                (!mail.address.is_empty()).then_some(Message::Reply),
+                (!self.reply_address(mail).is_empty()).then_some(Message::Reply),
             ),
             action_button(
                 style,

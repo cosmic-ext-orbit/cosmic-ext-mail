@@ -11,7 +11,7 @@ pub enum Message {
     Step(isize),
     OpenSelected,
     Scrolled(f32),
-    ResumeDraft,
+    ResumeDraft(uuid::Uuid),
     Refresh,
     Sort(SortOrder),
     AddAccount,
@@ -24,14 +24,23 @@ impl Mailbox {
     pub fn view<'a>(
         &'a self,
         query: &'a str,
-        has_draft: bool,
+        drafts: &[(uuid::Uuid, String)],
+        draft_read_error: bool,
         show_sender_pictures: bool,
         photos: Option<&crate::features::avatars::Avatars>,
     ) -> Element<'a, Message> {
         let mut rows = widget::column::with_capacity(self.contents.failures.len() + 3).spacing(4);
-        if self.folder == Folder::Drafts && has_draft {
-            rows = rows
-                .push(widget::button::standard(fl!("resume-draft")).on_press(Message::ResumeDraft));
+        if self.folder == Folder::Drafts {
+            for (id, subject) in drafts {
+                rows = rows.push(
+                    widget::button::standard(subject.clone())
+                        .leading_icon(widget::icon::from_name("document-edit-symbolic"))
+                        .on_press(Message::ResumeDraft(*id)),
+                );
+            }
+            if draft_read_error {
+                rows = rows.push(widget::text::caption(fl!("draft-storage-error")));
+            }
         }
         match self.status {
             Status::NoAccounts => {
@@ -52,7 +61,7 @@ impl Mailbox {
                 let mut matches = self.matching_messages(query).peekable();
                 if matches.peek().is_none()
                     && self.contents.failures.is_empty()
-                    && !(self.folder == Folder::Drafts && has_draft)
+                    && !(self.folder == Folder::Drafts && !drafts.is_empty())
                 {
                     let empty = if query.trim().is_empty() {
                         fl!("folder-empty")

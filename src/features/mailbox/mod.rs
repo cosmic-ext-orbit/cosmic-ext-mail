@@ -331,7 +331,7 @@ mod tests {
                 timestamp: 3 - index as i64,
             })
             .collect();
-        let mut state = Tree::new(mailbox.view("", false, false, None).as_widget());
+        let mut state = Tree::new(mailbox.view("", &[], false, false, None).as_widget());
 
         for (query, order, pictures, expected) in [
             ("Match", SortOrder::NewestFirst, false, &[1, 2][..]),
@@ -341,7 +341,11 @@ mod tests {
         ] {
             let _ = mailbox.set_sort_order(order);
             tree::NAMED.with(|named| *named.borrow_mut() = state.take_all_named());
-            state.diff(mailbox.view(query, false, pictures, None).as_widget_mut());
+            state.diff(
+                mailbox
+                    .view(query, &[], false, pictures, None)
+                    .as_widget_mut(),
+            );
             tree::NAMED.with(|named| named.borrow_mut().clear());
 
             assert!(

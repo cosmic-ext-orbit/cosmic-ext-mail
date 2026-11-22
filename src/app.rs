@@ -10,6 +10,7 @@ use crate::features::{
     search::{self, Search},
 };
 use crate::fl;
+use cosmic::Application;
 use cosmic::app::{Task, context_drawer};
 use cosmic::cosmic_config::{self, CosmicConfigEntry};
 use cosmic::iced::{Event, Length, Subscription, event, keyboard, window};
@@ -50,6 +51,8 @@ pub enum Message {
     ResizePanes(pane_grid::ResizeEvent),
     ToggleContextPage(ContextPage),
     CloseContext,
+    ExitRequested,
+    WindowCloseRequested(window::Id),
     LaunchUrl(String),
     SetLoadRemoteImages(bool),
     SetShowSenderPictures(bool),
@@ -213,8 +216,16 @@ impl cosmic::Application for AppModel {
             });
         Subscription::batch([
             photos,
+            self.composer
+                .subscription(self.core.main_window_id())
+                .map(Message::Composer),
+            cosmic::iced::window::close_requests().map(Message::WindowCloseRequested),
             self.reader.subscription().map(Message::Reader),
-            event::listen_with(shortcut),
+            event::listen_with(shortcut)
+                .with((self.core.main_window_id(), self.composer.is_open()))
+                .filter_map(|((main_window, composing), (id, message))| {
+                    (!composing && Some(id) == main_window).then_some(message)
+                }),
             self.watch_config(Self::APP_ID)
                 .map(|update| Message::ConfigUpdated(update.config)),
         ])
@@ -242,7 +253,12 @@ impl cosmic::Application for AppModel {
             Message::Search(message) => return self.update_search(message),
             Message::List(message) => return self.update_list(message),
             Message::Reader(message) => return self.update_reader(message),
-            Message::Composer(message) => self.composer.update(message),
+            Message::Composer(message) => {
+                return self
+                    .composer
+                    .update(message, self.accounts.saved().unwrap_or_default())
+                    .map(|message| Message::Composer(message).into());
+            }
             Message::ResizePanes(event) => self.panes.resize(event.split, event.ratio),
             Message::ToggleContextPage(page) => {
                 let show = self.context_page != page || !self.core.window.show_context;
@@ -250,6 +266,18 @@ impl cosmic::Application for AppModel {
                 self.set_show_context(show);
             }
             Message::CloseContext => self.set_show_context(false),
+            Message::WindowCloseRequested(id) => {
+                if self.core.main_window_is(id) {
+                    return self.update(Message::ExitRequested);
+                }
+            }
+            Message::ExitRequested => {
+                return if self.composer.prepare_to_exit() {
+                    cosmic::iced::exit()
+                } else {
+                    Task::none()
+                };
+            }
             Message::LaunchUrl(url) => {
                 let _ = open::that_detached(url);
             }
@@ -299,7 +327,8 @@ impl cosmic::Application for AppModel {
             self.mailbox
                 .view(
                     self.search.query(),
-                    self.composer.has_draft(),
+                    &self.composer.draft_rows(),
+                    self.composer.draft_read_error(),
                     self.config.show_recipient_pictures,
                     self.sender_photos(),
                 )
@@ -340,10 +369,13 @@ impl cosmic::Application for AppModel {
         content
     }
 
+    fn on_app_exit(&mut self) -> Option<Message> {
+        Some(Message::ExitRequested)
+    }
+
     fn on_escape(&mut self) -> Task<Message> {
         if self.composer.is_open() {
-            self.composer.update(composer::Message::Save);
-            return Task::none();
+            return self.update(Message::Composer(composer::Message::Close));
         }
         if self.core.window.show_context {
             self.set_show_context(false);
@@ -354,7 +386,7 @@ impl cosmic::Application for AppModel {
 
     fn dialog(&self) -> Option<Element<'_, Message>> {
         self.composer
-            .dialog()
+            .dialog(self.accounts.saved().unwrap_or_default())
             .map(|dialog| dialog.map(Message::Composer))
     }
 }
@@ -454,7 +486,9 @@ impl AppModel {
             }
             mailbox::Message::OpenSelected => self.open_selected(),
             mailbox::Message::Scrolled(offset) => self.mailbox.remember_scroll(offset),
-            mailbox::Message::ResumeDraft => self.composer.update(composer::Message::Open),
+            mailbox::Message::ResumeDraft(id) => {
+                return self.update(Message::Composer(composer::Message::OpenDraft(id)));
+            }
             mailbox::Message::Refresh => return self.reload_mail(),
             mailbox::Message::Sort(order) => {
                 return self
@@ -510,21 +544,36 @@ impl AppModel {
                 self.reader
                     .finish_load(request, result, self.config.load_remote_images);
             }
-            reader::Message::Reply => self.composer.reply(self.mailbox.selected()),
+            reader::Message::Reply => {
+                if let Some(mail) = self.mailbox.selected() {
+                    return self
+                        .composer
+                        .reply(
+                            mail,
+                            self.reader.reply_address(mail),
+                            self.reader.message_id(),
+                            self.reader.forward_text(),
+                        )
+                        .map(|message| Message::Composer(message).into());
+                }
+            }
             reader::Message::Forward => {
-                if let Some(mail) = self.mailbox.selected()
-                    && !self.composer.forward(mail, self.reader.forward_text())
-                {
-                    self.reader.set_action_error(fl!("forward-draft-exists"));
+                if let Some(mail) = self.mailbox.selected() {
+                    return self
+                        .composer
+                        .forward(mail, self.reader.forward_text())
+                        .map(|message| Message::Composer(message).into());
                 }
             }
             reader::Message::CopyAddress(address) => {
                 return cosmic::iced::clipboard::write(address);
             }
             reader::Message::ComposeTo(address) => {
-                if !self.composer.compose_to(address) {
-                    self.reader.set_action_error(fl!("forward-draft-exists"));
-                }
+                let account = self.mailbox.selected().map(|mail| mail.id.account);
+                return self
+                    .composer
+                    .compose_to(address, account)
+                    .map(|message| Message::Composer(message).into());
             }
             reader::Message::Change(change) => {
                 let Some(mail) = self.mailbox.selected() else {
@@ -605,7 +654,7 @@ impl AppModel {
     }
 }
 
-fn shortcut(event: Event, status: event::Status, _: window::Id) -> Option<Message> {
+fn shortcut(event: Event, status: event::Status, id: window::Id) -> Option<(window::Id, Message)> {
     use keyboard::key::Named;
 
     let Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) = event else {
@@ -614,7 +663,7 @@ fn shortcut(event: Event, status: event::Status, _: window::Id) -> Option<Messag
     if status == event::Status::Captured {
         return None;
     }
-    match key.as_ref() {
+    let message = match key.as_ref() {
         keyboard::Key::Character(",") if modifiers.control() => {
             Some(Message::ToggleContextPage(ContextPage::Settings))
         }
@@ -625,5 +674,6 @@ fn shortcut(event: Event, status: event::Status, _: window::Id) -> Option<Messag
         keyboard::Key::Named(Named::ArrowDown) => Some(Message::List(mailbox::Message::Step(1))),
         keyboard::Key::Named(Named::Enter) => Some(Message::List(mailbox::Message::OpenSelected)),
         _ => None,
-    }
+    }?;
+    Some((id, message))
 }

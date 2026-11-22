@@ -101,19 +101,25 @@ fn login_imap(account: &Account, password: &Password) -> Result<Session, Error> 
         .map_err(|_| Error::ImapLogin)
 }
 
-fn check_smtp(account: &Account, password: Password) -> Result<(), Error> {
+pub(in crate::features) fn smtp_transport(
+    account: &Account,
+    password: Password,
+) -> Result<SmtpTransport, Error> {
     let builder = if account.smtp_starttls {
         SmtpTransport::starttls_relay(&account.smtp_host)
     } else {
         SmtpTransport::relay(&account.smtp_host)
     }
     .map_err(|_| Error::SmtpConnect)?;
-    let transport = builder
+    Ok(builder
         .port(account.smtp_port)
         .timeout(Some(TIMEOUT))
         .credentials(Credentials::new(account.username.clone(), password.0))
-        .build();
-    match transport.test_connection() {
+        .build())
+}
+
+fn check_smtp(account: &Account, password: Password) -> Result<(), Error> {
+    match smtp_transport(account, password)?.test_connection() {
         Ok(true) => Ok(()),
         _ => Err(Error::SmtpConnect),
     }

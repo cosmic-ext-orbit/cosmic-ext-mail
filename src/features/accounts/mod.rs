@@ -9,10 +9,11 @@ use crate::fl;
 use cosmic::Task;
 use uuid::Uuid;
 
-pub(super) use connection::{with_imap, with_imap_session};
+pub(super) use connection::{smtp_transport, with_imap, with_imap_session};
 use model::Form;
 pub use model::{Account, Field, Password};
 use store::Store;
+pub(super) use store::stored_password;
 
 #[derive(Clone, Copy, Debug)]
 pub enum Error {
