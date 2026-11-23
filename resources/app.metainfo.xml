@@ -3,7 +3,7 @@
   <id>dev.edfloreshz.Mail</id>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>GPL-3.0-only</project_license>
-  <name>Cosmic Ext Mail</name>
+  <name>Mail</name>
   <summary>A mail client for the COSMIC desktop</summary>
   <icon type="remote" width="64" height="64" scale="1">
     https://github.com/cosmic-utils/cosmic-ext-mail/raw/main/resources/icons/hicolor/scalable/apps/icon.svg
@@ -32,4 +32,3 @@
   </keywords>
   <content_rating type="oars-1.1" />
 </component>
-

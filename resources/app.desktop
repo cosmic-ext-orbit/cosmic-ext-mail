@@ -1,11 +1,11 @@
 [Desktop Entry]
-Name=Cosmic Ext Mail
+Name=Mail
 Comment=A mail client for the COSMIC desktop
 Type=Application
 Icon=dev.edfloreshz.Mail
 Exec=cosmic-ext-mail %F
 Terminal=false
 StartupNotify=true
-Categories=COSMIC
+Categories=Network;Email;
 Keywords=COSMIC
 MimeType=

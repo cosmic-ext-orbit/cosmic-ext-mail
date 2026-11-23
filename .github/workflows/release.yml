@@ -1,0 +1,55 @@
+name: Release COSMIC Mail AppImage
+
+on:
+  push:
+    tags:
+      - '**'
+
+concurrency:
+  group: appimage-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: ${{ !github.event.deleted }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      RUSTUP_TOOLCHAIN: 1.99.0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install build and packaging dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang-19 llvm-19 libclang-19-dev lld-19 cmake curl \
+            m4 pkg-config python3 python3-venv \
+            libfontconfig-dev libfreetype-dev libgl-dev libssl-dev libudev-dev \
+            libwayland-dev libxkbcommon-dev desktop-file-utils just zsync
+          echo /usr/lib/llvm-19/bin >> "$GITHUB_PATH"
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+
+      - name: Build and verify release assets
+        run: just appimage
+
+      - name: Publish GitHub release
+        working-directory: dist
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          sha256sum --check SHA256SUMS
+          assets=(Mail-x86_64.AppImage Mail-x86_64.AppImage.zsync SHA256SUMS)
+          if draft=$(gh release view --json isDraft --jq .isDraft -- "$GITHUB_REF_NAME"); then
+            gh release upload --clobber -- "$GITHUB_REF_NAME" "${assets[@]}"
+            if [[ "$draft" == true ]]; then
+              gh release edit --draft=false -- "$GITHUB_REF_NAME"
+            fi
+          else
+            gh release create --verify-tag --generate-notes -- "$GITHUB_REF_NAME" "${assets[@]}"
+          fi

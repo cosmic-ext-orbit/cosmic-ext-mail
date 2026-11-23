@@ -23,7 +23,7 @@ appdata-dst := base-dir / 'share' / 'appdata' / appdata
 bin-dst := base-dir / 'bin' / name
 desktop-dst := base-dir / 'share' / 'applications' / desktop
 icons-dst := base-dir / 'share' / 'icons' / 'hicolor'
-icon-svg-dst := icons-dst / 'scalable' / 'apps'
+icon-svg-dst := icons-dst / 'scalable' / 'apps' / icon-svg
 
 # Default recipe which runs `just build-release`
 default: build-release
@@ -94,3 +94,64 @@ tag version:
     git commit --amend
     git tag -a {{version}} -m ''
 
+# Build the AppImage, zsync metadata, and checksums under dist.
+appimage:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ARCH=x86_64
+    APPIMAGE=Mail-x86_64.AppImage
+    repository="${GITHUB_REPOSITORY:-cosmic-utils/cosmic-ext-mail}"
+
+    if [[ "$(uname -sm)" != "Linux x86_64" ]]; then
+        echo "AppImage packaging requires Linux x86_64." >&2
+        exit 1
+    fi
+    for dependency in curl desktop-file-validate zsyncmake; do
+        if ! command -v "$dependency" >/dev/null; then
+            echo "Missing packaging dependency: $dependency" >&2
+            exit 1
+        fi
+    done
+
+    output="$PWD/dist"
+    mkdir -p "$output"
+    tools=$(mktemp -d "$output/.build.XXXXXX")
+    trap 'rm -rf -- "$tools"' EXIT
+    curl --fail --location --retry 3 \
+      https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20250213-2/linuxdeploy-x86_64.AppImage \
+      --output "$tools/linuxdeploy"
+    curl --fail --location --retry 3 \
+      https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage \
+      --output "$tools/appimagetool"
+    echo "ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0  $tools/appimagetool" | sha256sum --check
+    chmod +x "$tools/linuxdeploy" "$tools/appimagetool"
+
+    cargo build --locked --release --target-dir "{{cargo-target-dir}}"
+    install -Dm644 target/xdgen/app.metainfo.xml "$tools/AppDir/usr/share/metainfo/{{appid}}.metainfo.xml"
+    install -Dm644 resources/icons/hicolor/scalable/apps/icon.svg "$tools/{{appid}}.svg"
+    install -Dm644 target/xdgen/app.desktop "$tools/{{desktop}}"
+    desktop-file-validate "$tools/{{desktop}}"
+    APPIMAGE_EXTRACT_AND_RUN=1 "$tools/linuxdeploy" --appdir "$tools/AppDir" \
+      --executable "{{cargo-target-dir}}/release/{{name}}" \
+      --desktop-file "$tools/{{desktop}}" \
+      --icon-file "$tools/{{appid}}.svg"
+
+    cd "$tools"
+    update_info="gh-releases-zsync|${repository%/*}|${repository#*/}|latest|${APPIMAGE}.zsync"
+    ./appimagetool --appimage-extract > /dev/null
+    mv squashfs-root appimagetool-root
+    OWD="$tools" ./appimagetool-root/AppRun --updateinformation "$update_info" \
+      --file-url "$APPIMAGE" AppDir "$APPIMAGE"
+    test -s "$APPIMAGE.zsync"
+    LC_ALL=C grep -aFxm1 "URL: $APPIMAGE" "$APPIMAGE.zsync"
+    test "$(./"$APPIMAGE" --appimage-updateinformation)" = "$update_info"
+    "./$APPIMAGE" --appimage-extract > /dev/null
+    test -x squashfs-root/AppRun
+    test -x squashfs-root/usr/bin/{{name}}
+    test -s squashfs-root/{{appid}}.svg
+    test -s squashfs-root/usr/share/metainfo/{{appdata}}
+    grep -Fx 'Icon={{appid}}' squashfs-root/{{desktop}}
+    sha256sum "$APPIMAGE" "$APPIMAGE.zsync" > SHA256SUMS
+    sha256sum --check SHA256SUMS
+    mv -- "$APPIMAGE" "$APPIMAGE.zsync" SHA256SUMS "$output/"
+    printf 'AppImage: %s/%s\n' "$output" "$APPIMAGE"

@@ -1,10 +1,9 @@
-# Cosmic Ext Mail
-
-A mail client for the COSMIC desktop
-
-The first build may compile SpiderMonkey from source, which requires LLVM
-tools on `PATH`. If your distro installs them under a versioned directory,
-prepend that directory to `PATH` before running Cargo.
+<div align="center">
+    <img src="resources/icons/hicolor/scalable/apps/icon.svg" width="250" alt="Mail app icon" />
+    <h1>Mail</h1>
+    <h3>Your inbox, in focus.</h3>
+    <p>A mail client for the COSMIC desktop</p>
+</div>
 
 ## Installation
 

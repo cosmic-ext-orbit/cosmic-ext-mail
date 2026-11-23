@@ -1,4 +1,4 @@
-app-title = Cosmic Ext Mail
+app-title = Mail
 app-comment = A mail client for the COSMIC desktop
 app-keywords =
 about = About
