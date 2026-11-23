@@ -27,22 +27,25 @@ const READER_STYLES: &str = "
     }
 ";
 
-// Convert sender-defined colors too, and reverse the filter on foreground image elements.
 const DARK_READER_STYLES: &str = "
     html {
-        color-scheme: only light !important;
-        /* The viewport canvas is outside the body filter. */
-        background-color: black !important;
+        color-scheme: dark;
+        background-color: #18181b;
+        color: #f7f7f8;
     }
-    body {
-        background-color: white;
-        color: black;
-        filter: invert(1) hue-rotate(180deg) !important;
-    }
-    :is(img, svg):not(svg svg, svg img) {
-        filter: hue-rotate(180deg) invert(1) !important;
-    }
+    a:link { color: #8ab4f8; }
+    a:visited { color: #c6a0f6; }
 ";
+
+// This fixed embedder script runs independently of the message's blocked scripts.
+const ADAPT_DARK_MESSAGE: &str = include_str!("dark_reader.js");
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DarkAdaptation {
+    Pending,
+    Running,
+    Complete,
+}
 
 /// A live, read-only COSMIC pane for HTML, plain text, or raw MIME email.
 pub struct EmailView {
@@ -52,6 +55,7 @@ pub struct EmailView {
     delegate: Rc<Delegate>,
     content_manager: Rc<UserContentManager>,
     dark_styles: RefCell<Option<Rc<UserStyleSheet>>>,
+    dark_adaptation: Rc<Cell<DarkAdaptation>>,
     frame: RefCell<Option<image::Allocation>>,
     scale: Cell<f32>,
     focused: Cell<bool>,
@@ -113,6 +117,11 @@ impl EmailView {
             .delegate(delegate.clone())
             .clipboard_delegate(delegate.clone())
             .build();
+        webview.notify_theme_change(if dark_mode {
+            servo::Theme::Dark
+        } else {
+            servo::Theme::Light
+        });
         webview.show();
 
         Ok(Self {
@@ -122,6 +131,7 @@ impl EmailView {
             delegate,
             content_manager,
             dark_styles: RefCell::new(dark_styles),
+            dark_adaptation: Rc::new(Cell::new(DarkAdaptation::Pending)),
             frame: RefCell::new(None),
             scale: Cell::new(1.0),
             focused: Cell::new(false),
@@ -166,6 +176,11 @@ impl EmailView {
         } else if let Some(stylesheet) = dark_styles.take() {
             self.content_manager.remove_stylesheet(stylesheet);
         }
+        self.webview.notify_theme_change(if enabled {
+            servo::Theme::Dark
+        } else {
+            servo::Theme::Light
+        });
         self.delegate
             .reload_at(url.clone(), self.remote_images_enabled());
         self.load(url);
@@ -190,6 +205,7 @@ impl EmailView {
     }
 
     fn load(&self, url: url::Url) {
+        self.dark_adaptation.set(DarkAdaptation::Pending);
         self.frame.borrow_mut().take();
         self.dragging.set(false);
         self.webview.load(url);
@@ -216,6 +232,34 @@ impl EmailView {
         self.runtime.subscription()
     }
 
+    fn prepare_dark_frame(&self) -> bool {
+        if self.dark_styles.borrow().is_none()
+            || self.dark_adaptation.get() == DarkAdaptation::Complete
+        {
+            return true;
+        }
+        if self.dark_adaptation.get() == DarkAdaptation::Pending
+            && self.webview.load_status() == servo::LoadStatus::Complete
+            && let Some(url) = self.webview.url()
+        {
+            self.dark_adaptation.set(DarkAdaptation::Running);
+            let state = Rc::clone(&self.dark_adaptation);
+            let delegate = Rc::clone(&self.delegate);
+            let runtime = Rc::downgrade(&self.runtime);
+            self.webview
+                .evaluate_javascript(ADAPT_DARK_MESSAGE, move |_| {
+                    if delegate.is_current_url(&url) {
+                        state.set(DarkAdaptation::Complete);
+                        delegate.frame_ready.set(true);
+                        if let Some(runtime) = runtime.upgrade() {
+                            runtime.wake();
+                        }
+                    }
+                });
+        }
+        false
+    }
+
     fn update_frame(&self, bounds: Rectangle, renderer: &Renderer) {
         let scale = self.scale.get();
         self.webview
@@ -230,7 +274,7 @@ impl EmailView {
 
         self.runtime.servo.spin_event_loop();
         if self.delegate.frame_ready.replace(false) {
-            if !self.delegate.document_is_ready(&self.webview) {
+            if !self.delegate.document_is_ready(&self.webview) || !self.prepare_dark_frame() {
                 return;
             }
             self.webview.paint();

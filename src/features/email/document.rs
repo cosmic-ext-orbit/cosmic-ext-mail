@@ -151,6 +151,10 @@ impl Delegate {
         self.copied.borrow_mut().take();
     }
 
+    pub(super) fn is_current_url(&self, url: &Url) -> bool {
+        *url == self.document.borrow().url
+    }
+
     pub(super) fn document_is_ready(&self, webview: &WebView) -> bool {
         webview.url().as_ref() == Some(&self.document.borrow().url)
             && matches!(
