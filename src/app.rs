@@ -227,6 +227,7 @@ impl cosmic::Application for AppModel {
                 ],
             ),
         )])
+        .item_width(menu::ItemWidth::Uniform(280))
         .window_id_maybe(self.core.main_window_id())
         .on_surface_action(Message::MenuSurface);
         vec![menu_bar.into()]
@@ -287,13 +288,16 @@ impl cosmic::Application for AppModel {
     }
 
     fn subscription(&self) -> Subscription<Message> {
-        let photos = self
-            .sender_photos()
-            .map_or_else(Subscription::none, |avatars| {
-                avatars
-                    .subscription(self.mailbox.visible_sender_addresses(self.search.query()))
-                    .map(|(address, photo)| Message::SenderPhoto(address, photo))
-            });
+        let photos =
+            self.sender_photos()
+                .map_or_else(Subscription::none, |avatars| {
+                    avatars
+                        .subscription(self.mailbox.visible_sender_addresses(
+                            self.search.query(),
+                            self.composer.draft_count(),
+                        ))
+                        .map(|(address, photo)| Message::SenderPhoto(address, photo))
+                });
         Subscription::batch([
             photos,
             self.composer
@@ -826,12 +830,37 @@ impl AppModel {
                 return Task::batch([task, self.open_selected()]);
             }
             mailbox::Message::Step(direction) => {
-                let task = self.select(self.mailbox.step_selection(self.search.query(), direction));
+                let (selection, scroll) = self.mailbox.step_selection(
+                    self.search.query(),
+                    self.composer.draft_count(),
+                    direction,
+                );
+                let task = Task::batch([
+                    self.select(selection),
+                    scroll.map(|message| Message::List(message).into()),
+                ]);
                 return if self.narrow {
                     task
                 } else {
                     Task::batch([task, self.open_selected()])
                 };
+            }
+            mailbox::Message::TurnPage(direction) => {
+                let Some(scroll) = self.mailbox.turn_page(
+                    self.search.query(),
+                    self.composer.draft_count(),
+                    direction,
+                ) else {
+                    return Task::none();
+                };
+                self.reader.set_open(false);
+                return Task::batch([
+                    self.select(
+                        self.mailbox
+                            .selection_for(self.search.query(), self.composer.draft_count()),
+                    ),
+                    scroll.map(|message| Message::List(message).into()),
+                ]);
             }
             mailbox::Message::OpenSelected => return self.open_selected(),
             mailbox::Message::Scrolled(offset) => self.mailbox.remember_scroll(offset),
@@ -845,10 +874,14 @@ impl AppModel {
                     .map(|message| Message::List(message).into());
             }
             mailbox::Message::Sort(order) => {
-                return self
-                    .mailbox
-                    .set_sort_order(order)
-                    .map(|message| Message::List(message).into());
+                let scroll = self.mailbox.set_sort_order(order);
+                return Task::batch([
+                    self.select(
+                        self.mailbox
+                            .selection_for(self.search.query(), self.composer.draft_count()),
+                    ),
+                    scroll.map(|message| Message::List(message).into()),
+                ]);
             }
             mailbox::Message::AddAccount => {
                 return self.update(Message::Accounts(accounts::Message::Add));
@@ -858,7 +891,10 @@ impl AppModel {
             }
             mailbox::Message::Cached(request, contents) => {
                 if self.mailbox.finish_load(request, contents, false).is_some() {
-                    return self.select(self.mailbox.selection_for(self.search.query()));
+                    return self.select(
+                        self.mailbox
+                            .selection_for(self.search.query(), self.composer.draft_count()),
+                    );
                 }
             }
             mailbox::Message::Loaded(request, contents) => {
@@ -874,7 +910,9 @@ impl AppModel {
                 if let Some(selection_removed) =
                     self.mailbox.finish_load(request, Some(contents), true)
                 {
-                    let selection = self.mailbox.selection_for(self.search.query());
+                    let selection = self
+                        .mailbox
+                        .selection_for(self.search.query(), self.composer.draft_count());
                     if selection_removed && selection.is_none() {
                         self.reader.set_open(false);
                         return self.load_body();
@@ -944,7 +982,7 @@ impl AppModel {
                 self.reader.set_open(false);
                 return self
                     .mailbox
-                    .restore_list_position(self.search.query())
+                    .restore_list_position(self.search.query(), self.composer.draft_count())
                     .map(|message| Message::List(message).into());
             }
             reader::Message::ShowRemoteImages => self.reader.set_remote_images(true),
@@ -1048,11 +1086,13 @@ impl AppModel {
 
     fn refresh_list(&mut self) -> Task<Message> {
         self.reader.set_open(false);
+        let scroll = self.mailbox.reset_page();
         Task::batch([
-            self.select(self.mailbox.selection_for(self.search.query())),
-            self.mailbox
-                .scroll_to(0.0)
-                .map(|message| Message::List(message).into()),
+            self.select(
+                self.mailbox
+                    .selection_for(self.search.query(), self.composer.draft_count()),
+            ),
+            scroll.map(|message| Message::List(message).into()),
         ])
     }
 

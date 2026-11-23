@@ -15,7 +15,7 @@ use cosmic::iced::{
 };
 use cosmic::widget::{self, nav_bar};
 
-const VISIBLE_MESSAGE_LIMIT: usize = 500;
+const MESSAGES_PER_PAGE: usize = 50;
 pub const CONTENT_GUTTER: u16 = 8;
 
 pub struct Mailbox {
@@ -25,7 +25,8 @@ pub struct Mailbox {
     selected: Option<usize>,
     list_id: widget::Id,
     // Iced reconciles these buttons by position when filtering or sorting moves messages.
-    row_ids: [widget::Id; VISIBLE_MESSAGE_LIMIT],
+    row_ids: [widget::Id; MESSAGES_PER_PAGE],
+    page: usize,
     list_offset: f32,
     request: u64,
     syncing: bool,
@@ -34,6 +35,13 @@ pub struct Mailbox {
     status: Status,
     contents: remote::FolderContents,
     pending_changes: Vec<PendingChange>,
+}
+
+struct Page {
+    index: usize,
+    count: usize,
+    drafts: std::ops::Range<usize>,
+    messages: std::ops::Range<usize>,
 }
 
 struct PendingChange {
@@ -136,6 +144,7 @@ impl Mailbox {
             selected: None,
             list_id: widget::Id::unique(),
             row_ids: std::array::from_fn(|_| widget::Id::unique()),
+            page: 0,
             list_offset: 0.0,
             request: 0,
             syncing: false,
@@ -174,6 +183,7 @@ impl Mailbox {
         accounts: &crate::features::accounts::Accounts,
     ) -> cosmic::Task<Message> {
         self.selected = None;
+        self.page = 0;
         self.contents = remote::FolderContents::default();
         self.start_sync(accounts, true, true)
     }
@@ -476,7 +486,7 @@ impl Mailbox {
         true
     }
 
-    pub fn selection_for(&self, query: &str) -> Option<usize> {
+    pub fn selection_for(&self, query: &str, drafts: usize) -> Option<usize> {
         if self.selected.is_none()
             && self.pending_changes.iter().any(|pending| {
                 pending.folder == self.folder
@@ -490,7 +500,7 @@ impl Mailbox {
         {
             return None;
         }
-        let mut visible = self.visible_messages(query);
+        let mut visible = self.visible_messages(query, drafts);
         let first = visible.next()?.0;
         self.selected
             .filter(|&id| id == first || visible.any(|(visible_id, _)| visible_id == id))
@@ -501,10 +511,10 @@ impl Mailbox {
         self.list_offset = offset;
     }
 
-    pub fn restore_list_position(&mut self, query: &str) -> cosmic::Task<Message> {
+    pub fn restore_list_position(&mut self, query: &str, drafts: usize) -> cosmic::Task<Message> {
         let scroll = self.scroll_to(self.list_offset);
         let focus = self
-            .visible_messages(query)
+            .visible_messages(query, drafts)
             .position(|(index, _)| Some(index) == self.selected)
             .map_or_else(cosmic::Task::none, |position| {
                 widget::button::focus(self.row_ids[position].clone())
@@ -512,12 +522,74 @@ impl Mailbox {
         cosmic::Task::batch([scroll, focus])
     }
 
-    fn visible_messages<'a>(&'a self, query: &'a str) -> impl Iterator<Item = (usize, &'a Mail)> {
-        self.matching_messages(query).take(VISIBLE_MESSAGE_LIMIT)
+    fn page(&self, query: &str, drafts: usize) -> Page {
+        let drafts = if self.folder == Folder::Drafts {
+            drafts
+        } else {
+            0
+        };
+        let messages = if matches!(self.status, Status::Loaded) {
+            if query.trim().is_empty() {
+                self.contents.messages.len()
+            } else {
+                self.matching_messages(query).count()
+            }
+        } else {
+            0
+        };
+        let total = drafts + messages;
+        let count = total.div_ceil(MESSAGES_PER_PAGE).max(1);
+        let index = self.page.min(count - 1);
+        let start = index * MESSAGES_PER_PAGE;
+        let end = (start + MESSAGES_PER_PAGE).min(total);
+        Page {
+            index,
+            count,
+            drafts: start.min(drafts)..end.min(drafts),
+            messages: start.saturating_sub(drafts)..end.saturating_sub(drafts),
+        }
     }
 
-    pub fn visible_sender_addresses<'a>(&'a self, query: &'a str) -> impl Iterator<Item = &'a str> {
-        self.visible_messages(query)
+    fn visible_messages<'a>(
+        &'a self,
+        query: &'a str,
+        drafts: usize,
+    ) -> impl Iterator<Item = (usize, &'a Mail)> {
+        let range = self.page(query, drafts).messages;
+        self.matching_messages(query)
+            .skip(range.start)
+            .take(range.len())
+    }
+
+    pub fn turn_page(
+        &mut self,
+        query: &str,
+        drafts: usize,
+        direction: isize,
+    ) -> Option<cosmic::Task<Message>> {
+        let page = self.page(query, drafts);
+        let next = page
+            .index
+            .saturating_add_signed(direction)
+            .min(page.count - 1);
+        if next == page.index {
+            return None;
+        }
+        self.page = next;
+        Some(self.scroll_to(0.0))
+    }
+
+    pub fn reset_page(&mut self) -> cosmic::Task<Message> {
+        self.page = 0;
+        self.scroll_to(0.0)
+    }
+
+    pub fn visible_sender_addresses<'a>(
+        &'a self,
+        query: &'a str,
+        drafts: usize,
+    ) -> impl Iterator<Item = &'a str> {
+        self.visible_messages(query, drafts)
             .map(|(_, mail)| mail.address.as_str())
             .chain(self.selected().map(|mail| mail.address.as_str()))
     }
@@ -527,7 +599,7 @@ impl Mailbox {
             return cosmic::Task::none();
         }
         self.sort_order = order;
-        self.scroll_to(0.0)
+        self.reset_page()
     }
 
     fn matching_messages<'a>(&'a self, query: &'a str) -> impl Iterator<Item = (usize, &'a Mail)> {
@@ -543,13 +615,36 @@ impl Mailbox {
             .filter(move |(_, mail)| mail.matches(query))
     }
 
-    pub fn step_selection(&self, query: &str, step: isize) -> Option<usize> {
-        let ids: Vec<_> = self.visible_messages(query).map(|(id, _)| id).collect();
-        let Some(position) = ids.iter().position(|&id| Some(id) == self.selected) else {
-            return ids.first().copied();
+    pub fn step_selection(
+        &mut self,
+        query: &str,
+        drafts: usize,
+        step: isize,
+    ) -> (Option<usize>, cosmic::Task<Message>) {
+        let page = self.page(query, drafts);
+        let Some(position) = self
+            .matching_messages(query)
+            .position(|(id, _)| Some(id) == self.selected)
+            .filter(|position| page.messages.contains(position))
+        else {
+            return (self.selection_for(query, drafts), cosmic::Task::none());
         };
-        let index = position.saturating_add_signed(step).min(ids.len() - 1);
-        Some(ids[index])
+        let position = position.saturating_add_signed(step);
+        let Some((id, _)) = self.matching_messages(query).nth(position) else {
+            return (self.selected, cosmic::Task::none());
+        };
+        let drafts = if self.folder == Folder::Drafts {
+            drafts
+        } else {
+            0
+        };
+        self.page = (position + drafts) / MESSAGES_PER_PAGE;
+        let scroll = match self.page.cmp(&page.index) {
+            std::cmp::Ordering::Less => self.scroll_to(f32::MAX),
+            std::cmp::Ordering::Greater => self.scroll_to(0.0),
+            std::cmp::Ordering::Equal => cosmic::Task::none(),
+        };
+        (Some(id), scroll)
     }
 
     pub fn scroll_to(&mut self, offset: f32) -> cosmic::Task<Message> {
@@ -636,7 +731,7 @@ mod tests {
         );
         assert_eq!(mailbox.contents.messages.len(), 1);
         mailbox.finish_load(mailbox.request, Some(server), true);
-        assert_eq!(mailbox.selection_for(""), None);
+        assert_eq!(mailbox.selection_for("", 0), None);
         assert!(mailbox.finish_change(&first.id, false).restored_selection);
         assert_eq!(mailbox.selected().unwrap().id, first.id);
         assert_eq!(mailbox.contents.messages.len(), 2);
@@ -739,6 +834,59 @@ mod tests {
     }
 
     #[test]
+    fn pagination_reaches_all_matches_and_steps_across_pages() {
+        let mut mailbox = Mailbox::new();
+        mailbox.status = Status::Loaded;
+        mailbox.contents.messages = (0..(MESSAGES_PER_PAGE * 4 + 2))
+            .map(|index| {
+                let subject = if index % 2 == 0 { "Match" } else { "Other" };
+                mail(index as u32 + 1, subject)
+            })
+            .collect();
+
+        let query = "Match";
+        assert_eq!(mailbox.page(query, 0).count, 3);
+        assert_eq!(
+            mailbox.visible_messages(query, 0).count(),
+            MESSAGES_PER_PAGE
+        );
+        assert!(mailbox.set_selection(Some((MESSAGES_PER_PAGE - 1) * 2)));
+        let (selection, _) = mailbox.step_selection(query, 0, 1);
+        assert_eq!(selection, Some(MESSAGES_PER_PAGE * 2));
+        assert_eq!(mailbox.page(query, 0).index, 1);
+        assert!(mailbox.set_selection(selection));
+        let (selection, _) = mailbox.step_selection(query, 0, -1);
+        assert_eq!(selection, Some((MESSAGES_PER_PAGE - 1) * 2));
+        assert_eq!(mailbox.page(query, 0).index, 0);
+
+        assert!(mailbox.turn_page(query, 0, 1).is_some());
+        assert!(mailbox.turn_page(query, 0, 1).is_some());
+        assert!(mailbox.turn_page(query, 0, 1).is_none());
+        assert_eq!(mailbox.visible_messages(query, 0).count(), 1);
+        mailbox.contents.messages.truncate(MESSAGES_PER_PAGE);
+        assert_eq!(mailbox.page(query, 0).index, 0);
+    }
+
+    #[test]
+    fn local_drafts_and_server_messages_share_the_page_limit() {
+        let mut mailbox = Mailbox::new();
+        mailbox.folder = Folder::Drafts;
+        mailbox.status = Status::Loaded;
+        mailbox.contents.messages = vec![mail(1, "Server draft")];
+        let drafts = MESSAGES_PER_PAGE + 1;
+
+        let page = mailbox.page("", drafts);
+        assert_eq!(page.count, 2);
+        assert_eq!(page.drafts.len(), MESSAGES_PER_PAGE);
+        assert!(page.messages.is_empty());
+        assert!(mailbox.turn_page("", drafts, 1).is_some());
+
+        let page = mailbox.page("", drafts);
+        assert_eq!(page.drafts, MESSAGES_PER_PAGE..drafts);
+        assert_eq!(page.messages, 0..1);
+    }
+
+    #[test]
     fn filtering_and_sorting_preserve_message_button_state() {
         let mut mailbox = Mailbox::new();
         mailbox.status = Status::Loaded;
@@ -766,7 +914,7 @@ mod tests {
 
             assert!(
                 mailbox
-                    .visible_messages(query)
+                    .visible_messages(query, 0)
                     .map(|(index, _)| index)
                     .eq(expected.iter().copied())
             );

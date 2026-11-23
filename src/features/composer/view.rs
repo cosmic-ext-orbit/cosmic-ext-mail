@@ -10,6 +10,10 @@ use cosmic::{
 use uuid::Uuid;
 
 impl Composer {
+    pub fn draft_count(&self) -> usize {
+        self.drafts.len()
+    }
+
     pub fn draft_rows(&self) -> Vec<(Uuid, String)> {
         self.drafts
             .iter()

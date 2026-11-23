@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-use super::{
-    CONTENT_GUTTER, Folder, Mail, MailId, Mailbox, SortOrder, Status, VISIBLE_MESSAGE_LIMIT, remote,
-};
+use super::{CONTENT_GUTTER, Folder, Mail, MailId, Mailbox, SortOrder, Status, remote};
 use crate::fl;
 use cosmic::iced::{Length, window};
 use cosmic::widget::menu;
@@ -14,6 +12,7 @@ pub enum Message {
     RowAction(MailId, RowAction),
     MenuSurface(cosmic::surface::Action<Message>),
     Step(isize),
+    TurnPage(isize),
     OpenSelected,
     Scrolled(f32),
     ResumeDraft(uuid::Uuid),
@@ -50,9 +49,10 @@ impl Mailbox {
         photos: Option<&crate::features::avatars::Avatars>,
         window_id: Option<window::Id>,
     ) -> Element<'a, Message> {
+        let page = self.page(query, drafts.len());
         let mut rows = widget::column::with_capacity(self.contents.failures.len() + 3).spacing(4);
         if self.folder == Folder::Drafts {
-            for (id, subject) in drafts {
+            for (id, subject) in &drafts[page.drafts.clone()] {
                 rows = rows.push(
                     widget::button::standard(subject.clone())
                         .leading_icon(widget::icon::from_name("document-edit-symbolic"))
@@ -79,10 +79,9 @@ impl Mailbox {
                         error = error.text()
                     )));
                 }
-                let mut matches = self.matching_messages(query).peekable();
-                if matches.peek().is_none()
+                if page.messages.is_empty()
                     && self.contents.failures.is_empty()
-                    && !(self.folder == Folder::Drafts && !drafts.is_empty())
+                    && page.drafts.is_empty()
                 {
                     let empty = if query.trim().is_empty() {
                         fl!("folder-empty")
@@ -91,12 +90,12 @@ impl Mailbox {
                     };
                     rows = rows.push(widget::text::body(empty));
                 }
-                let mut messages = widget::column::with_capacity(
-                    self.contents.messages.len().min(VISIBLE_MESSAGE_LIMIT),
-                )
-                .spacing(4);
-                for (position, (id, mail)) in
-                    matches.by_ref().take(VISIBLE_MESSAGE_LIMIT).enumerate()
+                let mut messages = widget::column::with_capacity(page.messages.len()).spacing(4);
+                for (position, (id, mail)) in self
+                    .matching_messages(query)
+                    .skip(page.messages.start)
+                    .take(page.messages.len())
+                    .enumerate()
                 {
                     let sender = if mail.unread {
                         format!("• {}", mail.sender)
@@ -146,12 +145,6 @@ impl Mailbox {
                     messages = messages.push(self.row_menu(button, mail, window_id));
                 }
                 rows = rows.push(messages);
-                if matches.peek().is_some() {
-                    rows = rows.push(widget::text::caption(fl!(
-                        "mail-visible-limit",
-                        count = VISIBLE_MESSAGE_LIMIT
-                    )));
-                }
             }
         }
         let sort_index = SortOrder::ALL
@@ -178,7 +171,31 @@ impl Mailbox {
                     ),
             )
             .align_y(cosmic::iced::Alignment::Center);
-        let content = widget::column::with_capacity(2)
+        let pagination = (page.count > 1).then(|| {
+            widget::row::with_capacity(5)
+                .push(widget::space::horizontal())
+                .push(
+                    widget::button::icon(widget::icon::from_name("go-previous-symbolic"))
+                        .tooltip(fl!("mail-previous-page"))
+                        .on_press_maybe((page.index > 0).then_some(Message::TurnPage(-1))),
+                )
+                .push(widget::text::caption(fl!(
+                    "mail-page",
+                    page = (page.index + 1),
+                    total = page.count
+                )))
+                .push(
+                    widget::button::icon(widget::icon::from_name("go-next-symbolic"))
+                        .tooltip(fl!("mail-next-page"))
+                        .on_press_maybe(
+                            (page.index + 1 < page.count).then_some(Message::TurnPage(1)),
+                        ),
+                )
+                .push(widget::space::horizontal())
+                .align_y(cosmic::iced::Alignment::Center)
+                .spacing(8)
+        });
+        let content = widget::column::with_capacity(3)
             .push(header)
             .push(
                 widget::scrollable(rows)
@@ -187,6 +204,7 @@ impl Mailbox {
                     .height(Length::Fill)
                     .on_scroll(|viewport| Message::Scrolled(viewport.absolute_offset().y)),
             )
+            .push_maybe(pagination)
             .spacing(10)
             .height(Length::Fill);
 
