@@ -29,10 +29,14 @@ impl Composer {
     }
 
     pub fn new_message_button(&self) -> Element<'_, Message> {
-        widget::button::icon(widget::icon::from_name("list-add-symbolic"))
-            .tooltip(fl!("new-message"))
-            .on_press(Message::Open)
-            .into()
+        widget::tooltip(
+            widget::button::icon(widget::icon::from_name("list-add-symbolic"))
+                .name(fl!("new-message"))
+                .on_press(Message::Open),
+            widget::text(fl!("new-message")),
+            widget::tooltip::Position::Bottom,
+        )
+        .into()
     }
 
     pub fn dialog<'a>(&'a self, accounts: &'a [Account]) -> Option<Element<'a, Message>> {

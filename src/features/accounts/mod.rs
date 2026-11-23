@@ -135,6 +135,10 @@ impl Accounts {
         Ok(&self.accounts)
     }
 
+    pub fn is_adding(&self) -> bool {
+        matches!(&self.screen, Screen::Edit(form) if form.id.is_none())
+    }
+
     fn is_busy(&self) -> bool {
         matches!(self.status, Some(Status::Busy))
     }

@@ -31,6 +31,35 @@ pub enum Message {
     Change(remote::Change),
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct ComposeDetails {
+    pub reply_address: Option<String>,
+    pub message_id: Option<String>,
+    pub text: String,
+}
+
+impl ComposeDetails {
+    pub fn parse(bytes: &[u8]) -> Self {
+        Self::from_message(MessageParser::new().parse(bytes).as_ref())
+    }
+
+    fn from_message(message: Option<&mail_parser::Message<'_>>) -> Self {
+        Self {
+            reply_address: message
+                .and_then(|message| message.reply_to())
+                .and_then(|addresses| addresses.first())
+                .and_then(|mailbox| mailbox.address())
+                .map(str::to_owned),
+            message_id: message
+                .and_then(|message| message.message_id())
+                .map(str::to_owned),
+            text: message
+                .and_then(|message| message.body_text(0))
+                .map_or_else(String::new, std::borrow::Cow::into_owned),
+        }
+    }
+}
+
 pub struct Reader {
     email: Option<EmailView>,
     body: Body,
@@ -110,23 +139,14 @@ impl Reader {
         }
         let rendered = result.map_err(remote::Error::text).and_then(|bytes| {
             let message = MessageParser::new().parse(&bytes);
-            self.reply_address = message
-                .as_ref()
-                .and_then(|message| message.reply_to())
-                .and_then(|addresses| addresses.first())
-                .and_then(|mailbox| mailbox.address())
-                .map(str::to_owned);
-            self.message_id = message
-                .as_ref()
-                .and_then(|message| message.message_id())
-                .map(str::to_owned);
+            let details = ComposeDetails::from_message(message.as_ref());
+            self.reply_address = details.reply_address;
+            self.message_id = details.message_id;
+            self.forward_text = details.text;
             if let Some(addresses) = message.as_ref().and_then(|message| message.to()) {
                 self.recipients = Contact::from_list(addresses);
             }
 
-            if let Some(text) = message.as_ref().and_then(|message| message.body_text(0)) {
-                self.forward_text = text.into_owned();
-            }
             let body = EmailBody::Mime(&bytes);
             if let Some(view) = &mut self.email {
                 view.set_body_with_remote_images(body, load_remote_images)?;
@@ -184,7 +204,6 @@ impl Reader {
         mail: Option<&'a Mail>,
         folder: Folder,
         narrow: bool,
-        changing: bool,
         config: &'a Config,
         photos: Option<&'a crate::features::avatars::Avatars>,
     ) -> Element<'a, Message> {
@@ -213,7 +232,6 @@ impl Reader {
                 self.header(
                     mail,
                     folder,
-                    changing,
                     config,
                     photos.and_then(|photos| photos.get(&mail.address)),
                     size.width,
@@ -230,7 +248,6 @@ impl Reader {
         &'a self,
         mail: &'a Mail,
         folder: Folder,
-        changing: bool,
         config: &Config,
         photo: Option<&cosmic::iced::widget::image::Handle>,
         width: f32,
@@ -261,11 +278,8 @@ impl Reader {
             sender.into()
         };
 
-        let change = |action| (!changing).then_some(Message::Change(action));
         let move_to = |destination| {
-            (folder != destination)
-                .then(|| change(remote::Change::Move(destination)))
-                .flatten()
+            (folder != destination).then_some(Message::Change(remote::Change::Move(destination)))
         };
         let actions = widget::row::with_children([
             action_button(
@@ -298,7 +312,7 @@ impl Reader {
                 fl!("delete-message"),
                 move_to(Folder::Trash),
             ),
-            self.more_menu(mail, style, changing),
+            self.more_menu(mail, style),
             action_button(
                 style,
                 if mail.flagged {
@@ -311,7 +325,7 @@ impl Reader {
                 } else {
                     fl!("star-message")
                 },
-                change(remote::Change::Flagged(!mail.flagged)),
+                Some(Message::Change(remote::Change::Flagged(!mail.flagged))),
             ),
         ])
         .spacing(4)
@@ -366,12 +380,7 @@ impl Reader {
         }
         header.into()
     }
-    fn more_menu(
-        &self,
-        mail: &Mail,
-        style: MessageActions,
-        changing: bool,
-    ) -> Element<'static, Message> {
+    fn more_menu(&self, mail: &Mail, style: MessageActions) -> Element<'static, Message> {
         let label = if mail.unread {
             fl!("mark-message-read")
         } else {
@@ -379,7 +388,7 @@ impl Reader {
         };
         let mut items = vec![(
             label,
-            (!changing).then_some(Message::Change(remote::Change::Seen(mail.unread))),
+            Some(Message::Change(remote::Change::Seen(mail.unread))),
         )];
         if matches!(self.body, Body::Ready)
             && self

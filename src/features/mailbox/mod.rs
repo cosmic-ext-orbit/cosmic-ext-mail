@@ -6,7 +6,7 @@ mod model;
 mod notifications;
 pub mod remote;
 
-pub use list::Message;
+pub use list::{ComposeAction, Message, RowAction};
 pub use model::{Contact, Folder, Mail, MailId};
 
 use cosmic::iced::{
@@ -40,6 +40,34 @@ struct PendingChange {
     folder: Folder,
     original: Mail,
     change: remote::Change,
+    queued: Vec<remote::Change>,
+    was_selected: bool,
+}
+
+impl PendingChange {
+    fn apply(&self, messages: &mut Vec<Mail>) {
+        // A sync result can predate a change confirmed earlier in this queue.
+        if let Some(mail) = messages.iter_mut().find(|mail| mail.id == self.original.id) {
+            mail.unread = self.original.unread;
+            mail.flagged = self.original.flagged;
+        }
+        for change in std::iter::once(self.change).chain(self.queued.iter().copied()) {
+            change.apply(messages, &self.original.id);
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum ChangeStart {
+    Send,
+    Queued,
+    Unavailable,
+}
+
+#[derive(Default)]
+pub struct ChangeCompletion {
+    pub restored_selection: bool,
+    pub next: Option<remote::Change>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -272,9 +300,7 @@ impl Mailbox {
             .iter()
             .filter(|pending| pending.folder == self.folder)
         {
-            pending
-                .change
-                .apply(&mut contents.messages, &pending.original.id);
+            pending.apply(&mut contents.messages);
         }
         let selection = self.selected().map(|mail| &mail.id);
         let selected =
@@ -288,6 +314,12 @@ impl Mailbox {
 
     pub fn nav_model(&self) -> &nav_bar::Model {
         &self.nav
+    }
+
+    pub fn folder_id(&self, folder: Folder) -> Option<nav_bar::Id> {
+        self.nav
+            .iter()
+            .find(|&id| self.nav.data::<Folder>(id) == Some(&folder))
     }
 
     pub fn select_folder(&mut self, id: nav_bar::Id) -> bool {
@@ -310,74 +342,128 @@ impl Mailbox {
         self.selected.and_then(|id| self.contents.messages.get(id))
     }
 
-    pub fn selected_change_pending(&self) -> bool {
-        self.selected().is_some_and(|mail| {
-            self.pending_changes
-                .iter()
-                .any(|pending| pending.original.id == mail.id)
-        })
+    pub fn message_index(&self, id: &MailId) -> Option<usize> {
+        self.contents
+            .messages
+            .iter()
+            .position(|mail| mail.id == *id)
     }
 
-    pub fn begin_change(&mut self, change: remote::Change) -> Option<(Folder, MailId)> {
-        if self.selected_change_pending() {
-            return None;
-        }
-        let original = self.selected()?.clone();
-        let id = original.id.clone();
-        let folder = self.folder;
-        change.apply(&mut self.contents.messages, &id);
-        if matches!(change, remote::Change::Move(_)) {
-            self.selected = None;
-        }
-        self.pending_changes.push(PendingChange {
-            folder,
-            original,
-            change,
-        });
-        Some((folder, id))
+    pub fn message(&self, id: &MailId) -> Option<&Mail> {
+        self.message_index(id)
+            .and_then(|index| self.contents.messages.get(index))
     }
 
-    // Returns whether a removed message was restored as the current selection.
-    pub fn finish_change(&mut self, id: &MailId, succeeded: bool) -> bool {
+    pub fn begin_change(&mut self, id: &MailId, change: remote::Change) -> ChangeStart {
+        let Some(index) = self.message_index(id) else {
+            return ChangeStart::Unavailable;
+        };
+        let original = &self.contents.messages[index];
+        if !change.affects(original) {
+            return ChangeStart::Unavailable;
+        }
+        let previous = self
+            .pending_changes
+            .iter_mut()
+            .find(|pending| pending.original.id == *id);
+        let was_selected = self.selected == Some(index);
+        let moving = matches!(change, remote::Change::Move(_));
+        let start = if let Some(pending) = previous {
+            pending
+                .queued
+                .retain(|queued| std::mem::discriminant(queued) != std::mem::discriminant(&change));
+            pending.queued.push(change);
+            if moving {
+                pending.was_selected = was_selected;
+            }
+            ChangeStart::Queued
+        } else {
+            self.pending_changes.push(PendingChange {
+                folder: self.folder,
+                original: original.clone(),
+                change,
+                queued: Vec::new(),
+                was_selected: moving && was_selected,
+            });
+            ChangeStart::Send
+        };
+
+        change.apply(&mut self.contents.messages, id);
+        if moving {
+            self.selected = self
+                .selected
+                .and_then(|selection| match selection.cmp(&index) {
+                    std::cmp::Ordering::Less => Some(selection),
+                    std::cmp::Ordering::Equal => None,
+                    std::cmp::Ordering::Greater => Some(selection - 1),
+                });
+        }
+        start
+    }
+
+    pub fn finish_change(&mut self, id: &MailId, succeeded: bool) -> ChangeCompletion {
+        use remote::Change;
+
         let Some(index) = self
             .pending_changes
             .iter()
             .position(|pending| pending.original.id == *id)
         else {
-            return false;
+            return ChangeCompletion::default();
         };
-        let PendingChange {
-            folder,
-            original,
-            change,
-        } = self.pending_changes.remove(index);
-        if succeeded || folder != self.folder {
-            return false;
+        let mut pending = self.pending_changes.remove(index);
+        let move_failed = matches!(pending.change, Change::Move(_)) && !succeeded;
+        if succeeded {
+            match pending.change {
+                Change::Seen(seen) => pending.original.unread = !seen,
+                Change::Flagged(flagged) => pending.original.flagged = flagged,
+                Change::Move(_) => return ChangeCompletion::default(),
+            }
         }
 
-        match change {
-            remote::Change::Seen(_) => {
-                remote::Change::Seen(!original.unread).apply(&mut self.contents.messages, id);
-            }
-            remote::Change::Flagged(_) => {
-                remote::Change::Flagged(original.flagged).apply(&mut self.contents.messages, id);
-            }
-            remote::Change::Move(_) => {
-                let existing_selection = self.selected().map(|mail| mail.id.clone());
-                if !self.contents.messages.iter().any(|mail| mail.id == *id) {
-                    self.contents.messages.push(original);
-                    self.contents.sort();
-                }
-                let selected_id = existing_selection.as_ref().unwrap_or(id);
-                self.selected = self
-                    .contents
-                    .messages
-                    .iter()
-                    .position(|mail| mail.id == *selected_id);
-                return existing_selection.is_none() && self.selected.is_some();
-            }
+        // Skip queued toggles already satisfied by the last confirmed server state.
+        let next = pending
+            .queued
+            .iter()
+            .position(|change| change.affects(&pending.original))
+            .map(|index| {
+                pending
+                    .queued
+                    .drain(..=index)
+                    .last()
+                    .expect("queued change")
+            });
+        if let Some(change) = next {
+            pending.change = change;
         }
-        false
+
+        let mut restored_selection = false;
+        if pending.folder == self.folder {
+            let selection = self.selected().map(|mail| mail.id.clone());
+            if let Some(index) = self.message_index(id) {
+                let mail = &mut self.contents.messages[index];
+                mail.unread = pending.original.unread;
+                mail.flagged = pending.original.flagged;
+            } else if move_failed {
+                self.contents.messages.push(pending.original.clone());
+                self.contents.sort();
+            }
+
+            if next.is_some() {
+                pending.apply(&mut self.contents.messages);
+            }
+            let restore = move_failed && pending.was_selected && selection.is_none();
+            let selected = selection.as_ref().or(restore.then_some(id));
+            self.selected = selected.and_then(|id| self.message_index(id));
+            restored_selection = restore && self.selected.is_some();
+        }
+        if next.is_some() {
+            self.pending_changes.push(pending);
+        }
+        ChangeCompletion {
+            restored_selection,
+            next,
+        }
     }
 
     pub fn set_selection(&mut self, selection: Option<usize>) -> bool {
@@ -393,7 +479,13 @@ impl Mailbox {
     pub fn selection_for(&self, query: &str) -> Option<usize> {
         if self.selected.is_none()
             && self.pending_changes.iter().any(|pending| {
-                pending.folder == self.folder && matches!(pending.change, remote::Change::Move(_))
+                pending.folder == self.folder
+                    && pending.was_selected
+                    && (matches!(pending.change, remote::Change::Move(_))
+                        || pending
+                            .queued
+                            .iter()
+                            .any(|change| matches!(change, remote::Change::Move(_))))
             })
         {
             return None;
@@ -512,7 +604,10 @@ mod tests {
         mailbox.contents = server.clone();
         mailbox.set_selection(Some(0));
 
-        mailbox.begin_change(Change::Seen(true)).unwrap();
+        assert_eq!(
+            mailbox.begin_change(&first.id, Change::Seen(true)),
+            ChangeStart::Send
+        );
         mailbox.syncing = true;
         mailbox.update_download(mailbox.request, Some(remote::DownloadEvent::Started(2)));
         assert!(matches!(mailbox.activity(), Activity::Changing));
@@ -525,20 +620,122 @@ mod tests {
         assert!(!mailbox.selected().unwrap().unread);
 
         mailbox.set_selection(Some(1));
-        mailbox.begin_change(Change::Flagged(true)).unwrap();
+        assert_eq!(
+            mailbox.begin_change(&second.id, Change::Flagged(true)),
+            ChangeStart::Send
+        );
         mailbox.finish_change(&first.id, false);
         assert!(mailbox.contents.messages[0].unread);
         assert!(mailbox.selected().unwrap().flagged);
         mailbox.finish_change(&second.id, true);
 
         mailbox.set_selection(Some(0));
-        mailbox.begin_change(Change::Move(Folder::Archive)).unwrap();
+        assert_eq!(
+            mailbox.begin_change(&first.id, Change::Move(Folder::Archive)),
+            ChangeStart::Send
+        );
         assert_eq!(mailbox.contents.messages.len(), 1);
         mailbox.finish_load(mailbox.request, Some(server), true);
         assert_eq!(mailbox.selection_for(""), None);
-        assert!(mailbox.finish_change(&first.id, false));
+        assert!(mailbox.finish_change(&first.id, false).restored_selection);
         assert_eq!(mailbox.selected().unwrap().id, first.id);
         assert_eq!(mailbox.contents.messages.len(), 2);
+
+        mailbox.set_selection(Some(1));
+        assert_eq!(
+            mailbox.begin_change(&first.id, Change::Move(Folder::Trash)),
+            ChangeStart::Send
+        );
+        assert_eq!(mailbox.selected().unwrap().id, second.id);
+        assert!(!mailbox.finish_change(&first.id, false).restored_selection);
+        assert_eq!(mailbox.selected().unwrap().id, second.id);
+    }
+
+    #[test]
+    fn queued_mail_actions_preserve_latest_intent_and_rollback_independently() {
+        use remote::Change;
+
+        let mut original = mail(1, "Queued message");
+        original.unread = true;
+        let id = original.id.clone();
+        let mut mailbox = Mailbox::new();
+        mailbox.contents.messages.push(original.clone());
+        mailbox.set_selection(Some(0));
+
+        assert_eq!(
+            mailbox.begin_change(&id, Change::Seen(true)),
+            ChangeStart::Send
+        );
+        assert_eq!(
+            mailbox.begin_change(&id, Change::Seen(false)),
+            ChangeStart::Queued
+        );
+        assert!(mailbox.selected().unwrap().unread);
+        assert_eq!(
+            mailbox.begin_change(&id, Change::Flagged(true)),
+            ChangeStart::Queued
+        );
+        assert!(mailbox.selected().unwrap().flagged);
+        assert!(matches!(
+            mailbox.finish_change(&id, true).next,
+            Some(Change::Seen(false))
+        ));
+        assert!(mailbox.selected().unwrap().unread);
+
+        assert_eq!(
+            mailbox.begin_change(&id, Change::Move(Folder::Archive)),
+            ChangeStart::Queued
+        );
+        let stale = remote::FolderContents {
+            messages: vec![original],
+            ..Default::default()
+        };
+        mailbox.finish_load(mailbox.request, Some(stale), true);
+        assert!(mailbox.contents.messages.is_empty());
+        assert!(matches!(
+            mailbox.finish_change(&id, false).next,
+            Some(Change::Flagged(true))
+        ));
+        assert!(matches!(
+            mailbox.finish_change(&id, true).next,
+            Some(Change::Move(Folder::Archive))
+        ));
+        let finished = mailbox.finish_change(&id, false);
+        assert!(finished.restored_selection);
+        assert!(finished.next.is_none());
+        let restored = mailbox.selected().unwrap();
+        assert!(!restored.unread);
+        assert!(restored.flagged);
+
+        assert_eq!(
+            mailbox.begin_change(&id, Change::Flagged(false)),
+            ChangeStart::Send
+        );
+        assert_eq!(
+            mailbox.begin_change(&id, Change::Flagged(true)),
+            ChangeStart::Queued
+        );
+        assert!(mailbox.finish_change(&id, false).next.is_none());
+        assert!(mailbox.selected().unwrap().flagged);
+
+        // A sync already in flight can predate a confirmed queued change.
+        let stale = mailbox.contents.clone();
+        assert_eq!(
+            mailbox.begin_change(&id, Change::Seen(false)),
+            ChangeStart::Send
+        );
+        assert_eq!(
+            mailbox.begin_change(&id, Change::Flagged(false)),
+            ChangeStart::Queued
+        );
+        assert!(matches!(
+            mailbox.finish_change(&id, true).next,
+            Some(Change::Flagged(false))
+        ));
+        mailbox.finish_load(mailbox.request, Some(stale), true);
+        assert!(mailbox.selected().unwrap().unread);
+        assert!(!mailbox.selected().unwrap().flagged);
+        mailbox.finish_change(&id, true);
     }
 
     #[test]
@@ -550,7 +747,7 @@ mod tests {
             .enumerate()
             .map(|(index, subject)| mail(index as u32 + 1, subject))
             .collect();
-        let mut state = Tree::new(mailbox.view("", &[], false, false, None).as_widget());
+        let mut state = Tree::new(mailbox.view("", &[], false, false, None, None).as_widget());
 
         for (query, order, pictures, expected) in [
             ("Match", SortOrder::NewestFirst, false, &[1, 2][..]),
@@ -562,7 +759,7 @@ mod tests {
             tree::NAMED.with(|named| *named.borrow_mut() = state.take_all_named());
             state.diff(
                 mailbox
-                    .view(query, &[], false, pictures, None)
+                    .view(query, &[], false, pictures, None, None)
                     .as_widget_mut(),
             );
             tree::NAMED.with(|named| named.borrow_mut().clear());

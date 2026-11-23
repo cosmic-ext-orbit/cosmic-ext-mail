@@ -20,7 +20,7 @@ A [justfile](./justfile) is included by default for the [casey/just][just] comma
 ## Background mail
 
 After you open Mail, it checks for new Inbox messages even when its window is
-closed. Open Mail again to return to the same session, or choose **View → Quit
+closed. Open Mail again to return to the same session, or choose **Menu → Quit
 Mail** to stop background checks. Open Mail once after signing in to start
 checks for that session.
 

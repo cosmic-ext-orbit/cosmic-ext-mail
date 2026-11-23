@@ -490,6 +490,14 @@ pub enum Change {
 }
 
 impl Change {
+    pub(super) fn affects(self, mail: &Mail) -> bool {
+        match self {
+            Self::Move(_) => true,
+            Self::Seen(seen) => mail.unread == seen,
+            Self::Flagged(flagged) => mail.flagged != flagged,
+        }
+    }
+
     pub(super) fn apply(self, messages: &mut Vec<Mail>, id: &MailId) {
         let Some(index) = messages.iter().position(|mail| mail.id == *id) else {
             return;

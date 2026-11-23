@@ -13,10 +13,10 @@ use crate::fl;
 use cosmic::Application;
 use cosmic::app::{Task, context_drawer};
 use cosmic::cosmic_config::{self, CosmicConfigEntry};
-use cosmic::iced::{Event, Length, Subscription, event, keyboard, window};
+use cosmic::iced::{Length, Subscription, window};
 use cosmic::prelude::*;
 use cosmic::widget::{self, about::About, menu, nav_bar, pane_grid};
-use std::collections::HashMap;
+mod shortcuts;
 
 const SIDEBAR_COLLAPSE_WIDTH: f32 = 900.0;
 const SINGLE_PANE_WIDTH: f32 = 600.0;
@@ -31,10 +31,11 @@ enum Pane {
 pub enum ContextPage {
     Settings,
     About,
+    Shortcuts,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum MenuAction {
+pub enum MenuAction {
     Open(ContextPage),
     Quit,
 }
@@ -54,6 +55,7 @@ impl menu::Action for MenuAction {
 pub enum Message {
     Accounts(accounts::Message),
     Search(search::Message),
+    Shortcut(shortcuts::Action),
     List(mailbox::Message),
     Reader(reader::Message),
     MailChanged(
@@ -63,6 +65,13 @@ pub enum Message {
         Result<(), mailbox::remote::Error>,
     ),
     CloseToast(widget::ToastId),
+    MenuSurface(cosmic::surface::Action<Message>),
+    RowComposeLoaded {
+        request: uuid::Uuid,
+        action: mailbox::ComposeAction,
+        mail: Box<mailbox::Mail>,
+        result: Result<reader::ComposeDetails, mailbox::remote::Error>,
+    },
     Composer(composer::Message),
     ResizePanes(pane_grid::ResizeEvent),
     ToggleContextPage(ContextPage),
@@ -95,6 +104,7 @@ pub struct AppModel {
     avatars: Avatars,
     reader: Reader,
     toasts: widget::Toasts<Message>,
+    row_compose_request: Option<uuid::Uuid>,
     search: Search,
     composer: Composer,
     panes: pane_grid::State<Pane>,
@@ -145,13 +155,26 @@ impl cosmic::Application for AppModel {
             core,
             about: About::default()
                 .name(fl!("app-title"))
-                .comments(fl!("app-comment"))
+                .comments(fl!("about-description"))
+                .author("Eduardo Flores")
+                .developers([("Eduardo Flores", "edfloreshz@gmail.com")])
                 .icon(widget::icon::from_svg_bytes(include_bytes!(
                     "../resources/icons/hicolor/scalable/apps/icon.svg"
                 )))
                 .version(env!("CARGO_PKG_VERSION"))
                 .license(env!("CARGO_PKG_LICENSE"))
-                .links([(fl!("repository"), env!("CARGO_PKG_REPOSITORY"))]),
+                .license_url("https://www.gnu.org/licenses/gpl-3.0.html")
+                .links([
+                    (fl!("repository"), env!("CARGO_PKG_REPOSITORY")),
+                    (
+                        fl!("about-releases"),
+                        concat!(env!("CARGO_PKG_REPOSITORY"), "/releases"),
+                    ),
+                    (
+                        fl!("about-report-issue"),
+                        concat!(env!("CARGO_PKG_REPOSITORY"), "/issues"),
+                    ),
+                ]),
             context_page: ContextPage::Settings,
             config,
             config_handler,
@@ -161,6 +184,7 @@ impl cosmic::Application for AppModel {
             avatars: Avatars::default(),
             reader: Reader::new(),
             toasts: widget::Toasts::new(Message::CloseToast),
+            row_compose_request: None,
             search: Search::new(),
             composer: Composer::default(),
             panes,
@@ -177,20 +201,34 @@ impl cosmic::Application for AppModel {
 
     fn header_start(&self) -> Vec<Element<'_, Message>> {
         let menu_bar = menu::bar(vec![menu::Tree::with_children(
-            Element::from(menu::root(fl!("view"))),
+            Element::from(widget::tooltip(
+                widget::button::icon(widget::icon::from_name("open-menu-symbolic"))
+                    .padding([4, 12])
+                    .class(cosmic::theme::Button::MenuRoot)
+                    .name(fl!("app-menu")),
+                widget::text(fl!("app-menu")),
+                widget::tooltip::Position::Bottom,
+            )),
             menu::items(
-                &HashMap::new(),
+                &shortcuts::menu_bindings(),
                 vec![
                     menu::Item::Button(
                         fl!("settings"),
                         None,
                         MenuAction::Open(ContextPage::Settings),
                     ),
+                    menu::Item::Button(
+                        fl!("keyboard-shortcuts"),
+                        None,
+                        MenuAction::Open(ContextPage::Shortcuts),
+                    ),
                     menu::Item::Button(fl!("about"), None, MenuAction::Open(ContextPage::About)),
                     menu::Item::Button(fl!("mail-quit"), None, MenuAction::Quit),
                 ],
             ),
-        )]);
+        )])
+        .window_id_maybe(self.core.main_window_id())
+        .on_surface_action(Message::MenuSurface);
         vec![menu_bar.into()]
     }
 
@@ -210,6 +248,10 @@ impl cosmic::Application for AppModel {
             ContextPage::Settings => {
                 context_drawer::context_drawer(self.settings(), Message::CloseContext)
                     .title(fl!("settings"))
+            }
+            ContextPage::Shortcuts => {
+                context_drawer::context_drawer(shortcuts::view(), Message::CloseContext)
+                    .title(fl!("keyboard-shortcuts"))
             }
             ContextPage::About => context_drawer::about(
                 &self.about,
@@ -261,11 +303,17 @@ impl cosmic::Application for AppModel {
                 .map(|_| Message::CheckInbox),
             cosmic::iced::window::close_requests().map(Message::WindowCloseRequested),
             self.reader.subscription().map(Message::Reader),
-            event::listen_with(shortcut)
-                .with((self.core.main_window_id(), self.composer.is_open()))
-                .filter_map(|((main_window, composing), (id, message))| {
-                    (!composing && Some(id) == main_window).then_some(message)
-                }),
+            shortcuts::subscription(
+                self.core.main_window_id(),
+                if self.accounts.is_adding() {
+                    shortcuts::Scope::Account
+                } else if self.composer.is_open() {
+                    shortcuts::Scope::Composer
+                } else {
+                    shortcuts::Scope::Mail
+                },
+            )
+            .map(Message::Shortcut),
             self.watch_config(Self::APP_ID)
                 .map(|update| Message::ConfigUpdated(update.config)),
         ])
@@ -274,6 +322,7 @@ impl cosmic::Application for AppModel {
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Accounts(message) => {
+                let was_adding = self.accounts.is_adding();
                 let reload = matches!(
                     &message,
                     accounts::Message::Finished(Ok(
@@ -284,6 +333,11 @@ impl cosmic::Application for AppModel {
                     .accounts
                     .update(message)
                     .map(|message| Message::Accounts(message).into());
+                let adding = self.accounts.is_adding();
+                if was_adding != adding {
+                    self.context_page = ContextPage::Settings;
+                    self.set_show_context(!adding);
+                }
                 return if reload {
                     Task::batch([update, self.reload_mail()])
                 } else {
@@ -291,14 +345,54 @@ impl cosmic::Application for AppModel {
                 };
             }
             Message::Search(message) => return self.update_search(message),
+            Message::Shortcut(action) => return self.update_shortcut(action),
             Message::List(message) => return self.update_list(message),
             Message::Reader(message) => return self.update_reader(message),
+            Message::RowComposeLoaded {
+                request,
+                action,
+                mail,
+                result,
+            } => {
+                if self.row_compose_request != Some(request) || self.core.main_window_id().is_none()
+                {
+                    return Task::none();
+                }
+                self.row_compose_request = None;
+                let details = match result {
+                    Ok(details) => details,
+                    Err(error) => return self.mail_action_error(error.text()),
+                };
+                let task = match action {
+                    mailbox::ComposeAction::Reply => {
+                        let address = details.reply_address.as_deref().unwrap_or(&mail.address);
+                        if address.is_empty() {
+                            return self.mail_action_error(fl!("mail-no-reply-address"));
+                        }
+                        self.composer.reply(
+                            &mail,
+                            address,
+                            details.message_id.as_deref(),
+                            &details.text,
+                        )
+                    }
+                    mailbox::ComposeAction::Forward => self.composer.forward(&mail, &details.text),
+                };
+                return task.map(|message| Message::Composer(message).into());
+            }
             Message::CloseToast(id) => self.toasts.remove(id),
+            Message::MenuSurface(action) => return cosmic::surface::surface_task(action),
             Message::MailChanged(source, id, change, result) => {
-                let restored = self.mailbox.finish_change(&id, result.is_ok());
+                let completion = self.mailbox.finish_change(&id, result.is_ok());
+                if let Some(next) = completion.next {
+                    let toast = result
+                        .err()
+                        .map_or_else(Task::none, |error| self.mail_action_error(error.text()));
+                    return Task::batch([toast, self.send_mail_change(source, id, next)]);
+                }
                 if let Err(error) = result {
                     let toast = self.mail_action_error(error.text());
-                    if restored {
+                    if completion.restored_selection {
                         self.reader.set_open(true);
                         return Task::batch([toast, self.load_body()]);
                     }
@@ -315,6 +409,12 @@ impl cosmic::Application for AppModel {
                 }
             }
             Message::Composer(message) => {
+                if matches!(
+                    message,
+                    composer::Message::Open | composer::Message::OpenDraft(_)
+                ) {
+                    self.row_compose_request = None;
+                }
                 return self
                     .composer
                     .update(message, self.accounts.saved().unwrap_or_default())
@@ -322,6 +422,9 @@ impl cosmic::Application for AppModel {
             }
             Message::ResizePanes(event) => self.panes.resize(event.split, event.ratio),
             Message::ToggleContextPage(page) => {
+                if self.accounts.is_adding() {
+                    return Task::none();
+                }
                 let show = self.context_page != page || !self.core.window.show_context;
                 self.context_page = page;
                 self.set_show_context(show);
@@ -343,6 +446,7 @@ impl cosmic::Application for AppModel {
                 if self.core.main_window_is(id) {
                     self.core.set_main_window_id(None);
                     self.reader.release_window();
+                    self.row_compose_request = None;
                     self.mailbox.cancel_sync();
                     return self.check_inbox();
                 }
@@ -428,6 +532,7 @@ impl cosmic::Application for AppModel {
                     self.composer.draft_read_error(),
                     self.config.show_recipient_pictures,
                     self.sender_photos(),
+                    self.core.main_window_id(),
                 )
                 .map(Message::List)
         };
@@ -437,7 +542,6 @@ impl cosmic::Application for AppModel {
                     self.mailbox.selected(),
                     self.mailbox.folder(),
                     self.narrow,
-                    self.mailbox.selected_change_pending(),
                     &self.config,
                     self.sender_photos(),
                 )
@@ -496,7 +600,7 @@ impl cosmic::Application for AppModel {
             None if self.checking_inbox => {
                 Some((fl!("mail-checking-inbox"), widget::indeterminate_linear()))
             }
-            None if self.reader.is_loading() => {
+            None if self.reader.is_loading() || self.row_compose_request.is_some() => {
                 Some((fl!("mail-body-loading"), widget::indeterminate_linear()))
             }
             None => None,
@@ -555,6 +659,9 @@ impl cosmic::Application for AppModel {
     }
 
     fn on_escape(&mut self) -> Task<Message> {
+        if self.accounts.is_adding() {
+            return self.update(Message::Accounts(accounts::Message::Back));
+        }
         if self.composer.is_open() {
             return self.update(Message::Composer(composer::Message::Close));
         }
@@ -566,6 +673,9 @@ impl cosmic::Application for AppModel {
     }
 
     fn dialog(&self) -> Option<Element<'_, Message>> {
+        if let Some(dialog) = self.accounts.add_dialog() {
+            return Some(dialog.map(Message::Accounts));
+        }
         self.composer
             .dialog(self.accounts.saved().unwrap_or_default())
             .map(|dialog| dialog.map(Message::Composer))
@@ -640,6 +750,57 @@ impl AppModel {
         self.config = config;
     }
 
+    fn update_shortcut(&mut self, action: shortcuts::Action) -> Task<Message> {
+        use mailbox::{ComposeAction, RowAction};
+        use shortcuts::Action;
+
+        let message = match action {
+            Action::Menu(action) => menu::Action::message(&action),
+            Action::NewMessage => Message::Composer(composer::Message::Open),
+            Action::Search => Message::Search(search::Message::Focus),
+            Action::Refresh => Message::List(mailbox::Message::Refresh),
+            Action::AddAccount => Message::Accounts(accounts::Message::Add),
+            Action::CloseWindow => Message::CloseWindow,
+            Action::Folder(folder) => {
+                return self
+                    .mailbox
+                    .folder_id(folder)
+                    .map_or_else(Task::none, |id| self.on_nav_select(id));
+            }
+            Action::Step(direction) => Message::List(mailbox::Message::Step(direction)),
+            Action::OpenMessage => Message::List(mailbox::Message::OpenSelected),
+            Action::Send => Message::Composer(composer::Message::Send),
+            Action::Attach => Message::Composer(composer::Message::Attach),
+            Action::SaveDraft => Message::Composer(composer::Message::Autosave),
+            Action::DiscardDraft => Message::Composer(composer::Message::ConfirmDiscard(true)),
+            Action::CloseDialog => return self.on_escape(),
+            Action::TestAccount => Message::Accounts(accounts::Message::Check),
+            Action::SaveAccount => Message::Accounts(accounts::Message::Save),
+            action => {
+                let Some(mail) = self.mailbox.selected() else {
+                    return Task::none();
+                };
+                let row_action = match action {
+                    Action::Reply => RowAction::Compose(ComposeAction::Reply),
+                    Action::Forward => RowAction::Compose(ComposeAction::Forward),
+                    Action::CopySender if !mail.address.is_empty() => RowAction::CopySender,
+                    Action::ToggleRead => {
+                        RowAction::Change(mailbox::remote::Change::Seen(mail.unread))
+                    }
+                    Action::ToggleStar => {
+                        RowAction::Change(mailbox::remote::Change::Flagged(!mail.flagged))
+                    }
+                    Action::Move(folder) if self.mailbox.folder() != folder => {
+                        RowAction::Change(mailbox::remote::Change::Move(folder))
+                    }
+                    _ => return Task::none(),
+                };
+                return self.update_row(mail.id.clone(), row_action);
+            }
+        };
+        self.update(message)
+    }
+
     fn update_search(&mut self, message: search::Message) -> Task<Message> {
         match message {
             search::Message::Changed(query) => {
@@ -656,6 +817,10 @@ impl AppModel {
 
     fn update_list(&mut self, message: mailbox::Message) -> Task<Message> {
         match message {
+            mailbox::Message::RowAction(id, action) => return self.update_row(id, action),
+            mailbox::Message::MenuSurface(action) => {
+                return cosmic::surface::surface_task(action.map(Message::List));
+            }
             mailbox::Message::Select(id) => {
                 let task = self.select(Some(id));
                 return Task::batch([task, self.open_selected()]);
@@ -686,12 +851,7 @@ impl AppModel {
                     .map(|message| Message::List(message).into());
             }
             mailbox::Message::AddAccount => {
-                self.context_page = ContextPage::Settings;
-                self.set_show_context(true);
-                return self
-                    .accounts
-                    .update(accounts::Message::Add)
-                    .map(|message| Message::Accounts(message).into());
+                return self.update(Message::Accounts(accounts::Message::Add));
             }
             mailbox::Message::Download(request, event) => {
                 self.mailbox.update_download(request, event)
@@ -726,6 +886,57 @@ impl AppModel {
         Task::none()
     }
 
+    fn update_row(&mut self, id: mailbox::MailId, action: mailbox::RowAction) -> Task<Message> {
+        use mailbox::RowAction;
+
+        let Some(mail) = self.mailbox.message(&id) else {
+            return self.mail_action_error(fl!("mail-unavailable"));
+        };
+        match action {
+            RowAction::Open => {
+                let task = self.select(self.mailbox.message_index(&id));
+                Task::batch([task, self.open_selected()])
+            }
+            RowAction::Change(change) => self.change_mail(id, change),
+            RowAction::CopySender => cosmic::iced::clipboard::write(mail.address.clone()),
+            RowAction::ComposeToSender => {
+                self.row_compose_request = None;
+                self.composer
+                    .compose_to(mail.address.clone(), Some(id.account))
+                    .map(|message| Message::Composer(message).into())
+            }
+            RowAction::Compose(action) => {
+                let Some(account) = self
+                    .accounts
+                    .saved()
+                    .ok()
+                    .and_then(|accounts| accounts.iter().find(|account| account.id == id.account))
+                    .cloned()
+                else {
+                    return self.mail_action_error(fl!("mail-unavailable"));
+                };
+                let mail = Box::new(mail.clone());
+                let request = uuid::Uuid::new_v4();
+                self.row_compose_request = Some(request);
+                Task::perform(
+                    async move {
+                        let bytes = mailbox::remote::body(account, id).await?;
+                        Ok(reader::ComposeDetails::parse(&bytes))
+                    },
+                    move |result| {
+                        Message::RowComposeLoaded {
+                            request,
+                            action,
+                            mail,
+                            result,
+                        }
+                        .into()
+                    },
+                )
+            }
+        }
+    }
+
     fn update_reader(&mut self, message: reader::Message) -> Task<Message> {
         match message {
             reader::Message::Wake => {}
@@ -743,6 +954,7 @@ impl AppModel {
                     .finish_load(request, result, self.config.load_remote_images);
             }
             reader::Message::Reply => {
+                self.row_compose_request = None;
                 if let Some(mail) = self.mailbox.selected() {
                     return self
                         .composer
@@ -756,6 +968,7 @@ impl AppModel {
                 }
             }
             reader::Message::Forward => {
+                self.row_compose_request = None;
                 if let Some(mail) = self.mailbox.selected() {
                     return self
                         .composer
@@ -873,34 +1086,57 @@ impl AppModel {
     }
 
     fn change_selected(&mut self, change: mailbox::remote::Change) -> Task<Message> {
-        let Some(mail) = self.mailbox.selected() else {
-            return Task::none();
+        if let Some(mail) = self.mailbox.selected() {
+            self.change_mail(mail.id.clone(), change)
+        } else {
+            Task::none()
+        }
+    }
+
+    fn change_mail(
+        &mut self,
+        id: mailbox::MailId,
+        change: mailbox::remote::Change,
+    ) -> Task<Message> {
+        let closes_reader = matches!(change, mailbox::remote::Change::Move(_))
+            && self.mailbox.selected().is_some_and(|mail| mail.id == id);
+        let source = self.mailbox.folder();
+        let request = match self.mailbox.begin_change(&id, change) {
+            mailbox::ChangeStart::Send => self.send_mail_change(source, id, change),
+            mailbox::ChangeStart::Queued => Task::none(),
+            mailbox::ChangeStart::Unavailable => return Task::none(),
         };
-        let account = self
-            .accounts
-            .saved()
-            .ok()
-            .and_then(|accounts| {
-                accounts
-                    .iter()
-                    .find(|account| account.id == mail.id.account)
-            })
-            .cloned();
-        let Some(account) = account else {
-            return self.mail_action_error(fl!("mail-unavailable"));
-        };
-        let Some((source, id)) = self.mailbox.begin_change(change) else {
-            return Task::none();
-        };
-        let request = Task::perform(
-            mailbox::remote::change(account, source, id.clone(), change),
-            move |result| Message::MailChanged(source, id, change, result).into(),
-        );
-        if matches!(change, mailbox::remote::Change::Move(_)) {
+        if closes_reader {
             self.reader.set_open(false);
             return Task::batch([request, self.load_body()]);
         }
         request
+    }
+
+    fn send_mail_change(
+        &self,
+        source: mailbox::Folder,
+        id: mailbox::MailId,
+        change: mailbox::remote::Change,
+    ) -> Task<Message> {
+        let account = self
+            .accounts
+            .saved()
+            .ok()
+            .and_then(|accounts| accounts.iter().find(|account| account.id == id.account))
+            .cloned();
+        let Some(account) = account else {
+            return Task::done(cosmic::action::app(Message::MailChanged(
+                source,
+                id,
+                change,
+                Err(mailbox::remote::Error::MessageUnavailable),
+            )));
+        };
+        Task::perform(
+            mailbox::remote::change(account, source, id.clone(), change),
+            move |result| Message::MailChanged(source, id, change, result).into(),
+        )
     }
 
     fn mail_action_error(&mut self, error: String) -> Task<Message> {
@@ -908,29 +1144,4 @@ impl AppModel {
             .push(widget::Toast::new(error))
             .map(cosmic::action::app)
     }
-}
-
-fn shortcut(event: Event, status: event::Status, id: window::Id) -> Option<(window::Id, Message)> {
-    use keyboard::key::Named;
-
-    let Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) = event else {
-        return None;
-    };
-    if status == event::Status::Captured {
-        return None;
-    }
-    let message = match key.as_ref() {
-        keyboard::Key::Character(",") if modifiers.control() => {
-            Some(Message::ToggleContextPage(ContextPage::Settings))
-        }
-        keyboard::Key::Character("q") if modifiers.control() => Some(Message::ExitRequested),
-        keyboard::Key::Character("f") if modifiers.control() => {
-            Some(Message::Search(search::Message::Focus))
-        }
-        keyboard::Key::Named(Named::ArrowUp) => Some(Message::List(mailbox::Message::Step(-1))),
-        keyboard::Key::Named(Named::ArrowDown) => Some(Message::List(mailbox::Message::Step(1))),
-        keyboard::Key::Named(Named::Enter) => Some(Message::List(mailbox::Message::OpenSelected)),
-        _ => None,
-    }?;
-    Some((id, message))
 }

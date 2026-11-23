@@ -1,13 +1,18 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-use super::{CONTENT_GUTTER, Folder, Mailbox, SortOrder, Status, VISIBLE_MESSAGE_LIMIT, remote};
+use super::{
+    CONTENT_GUTTER, Folder, Mail, MailId, Mailbox, SortOrder, Status, VISIBLE_MESSAGE_LIMIT, remote,
+};
 use crate::fl;
-use cosmic::iced::Length;
+use cosmic::iced::{Length, window};
+use cosmic::widget::menu;
 use cosmic::{Element, widget};
 
 #[derive(Clone, Debug)]
 pub enum Message {
     Select(usize),
+    RowAction(MailId, RowAction),
+    MenuSurface(cosmic::surface::Action<Message>),
     Step(isize),
     OpenSelected,
     Scrolled(f32),
@@ -20,6 +25,21 @@ pub enum Message {
     Download(u64, Option<remote::DownloadEvent>),
 }
 
+#[derive(Clone, Copy, Debug)]
+pub enum ComposeAction {
+    Reply,
+    Forward,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum RowAction {
+    Open,
+    Compose(ComposeAction),
+    CopySender,
+    ComposeToSender,
+    Change(remote::Change),
+}
+
 impl Mailbox {
     pub fn view<'a>(
         &'a self,
@@ -28,6 +48,7 @@ impl Mailbox {
         draft_read_error: bool,
         show_sender_pictures: bool,
         photos: Option<&crate::features::avatars::Avatars>,
+        window_id: Option<window::Id>,
     ) -> Element<'a, Message> {
         let mut rows = widget::column::with_capacity(self.contents.failures.len() + 3).spacing(4);
         if self.folder == Folder::Drafts {
@@ -115,15 +136,14 @@ impl Mailbox {
                     } else {
                         row.into()
                     };
-                    messages = messages.push(
-                        widget::button::custom(row)
-                            .id(self.row_ids[position].clone())
-                            .class(cosmic::theme::Button::ListItem([6.0; 4]))
-                            .width(Length::Fill)
-                            .padding(10)
-                            .selected(self.selected == Some(id))
-                            .on_press(Message::Select(id)),
-                    );
+                    let button = widget::button::custom(row)
+                        .id(self.row_ids[position].clone())
+                        .class(cosmic::theme::Button::ListItem([6.0; 4]))
+                        .width(Length::Fill)
+                        .padding(10)
+                        .selected(self.selected == Some(id))
+                        .on_press(Message::Select(id));
+                    messages = messages.push(self.row_menu(button, mail, window_id));
                 }
                 rows = rows.push(messages);
                 if matches.peek().is_some() {
@@ -180,6 +200,75 @@ impl Mailbox {
             .padding(CONTENT_GUTTER)
             .width(Length::Fill)
             .height(Length::Fill)
+            .into()
+    }
+
+    fn row_menu<'a>(
+        &self,
+        button: impl Into<Element<'a, Message>>,
+        mail: &Mail,
+        window_id: Option<window::Id>,
+    ) -> Element<'a, Message> {
+        use RowAction::{Change, Compose, ComposeToSender, CopySender, Open};
+
+        let has_sender = !mail.address.is_empty();
+        let item = |label: String, action: RowAction| {
+            menu::Tree::new(Element::from(
+                menu::menu_button(vec![widget::text(label).into()])
+                    .on_press(Message::RowAction(mail.id.clone(), action)),
+            ))
+        };
+        let divider = || menu::Tree::new(Element::from(widget::divider::horizontal::light()));
+        let mut items = vec![
+            item(fl!("mail-open-message"), Open),
+            item(fl!("reply"), Compose(ComposeAction::Reply)),
+            item(fl!("forward"), Compose(ComposeAction::Forward)),
+        ];
+        if has_sender {
+            items.extend([
+                item(fl!("copy-email-address"), CopySender),
+                item(fl!("compose-to-address"), ComposeToSender),
+            ]);
+        }
+        items.extend([
+            divider(),
+            item(
+                if mail.unread {
+                    fl!("mark-message-read")
+                } else {
+                    fl!("mark-message-unread")
+                },
+                Change(remote::Change::Seen(mail.unread)),
+            ),
+            item(
+                if mail.flagged {
+                    fl!("unstar-message")
+                } else {
+                    fl!("star-message")
+                },
+                Change(remote::Change::Flagged(!mail.flagged)),
+            ),
+            divider(),
+        ]);
+        if matches!(self.folder, Folder::Archive | Folder::Junk | Folder::Trash) {
+            items.push(item(
+                fl!("mail-move-to-inbox"),
+                Change(remote::Change::Move(Folder::Inbox)),
+            ));
+        }
+        for (folder, label) in [
+            (Folder::Archive, fl!("archive-message")),
+            (Folder::Junk, fl!("spam-message")),
+            (Folder::Trash, fl!("delete-message")),
+        ] {
+            if folder != self.folder {
+                items.push(item(label, Change(remote::Change::Move(folder))));
+            }
+        }
+
+        widget::context_menu(button, Some(items))
+            .window_id(window_id.unwrap_or(window::Id::NONE))
+            .on_surface_action(Message::MenuSurface)
             .into()
     }
 }

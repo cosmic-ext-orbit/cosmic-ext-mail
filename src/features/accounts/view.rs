@@ -12,9 +12,40 @@ impl Accounts {
     pub fn view(&self) -> Element<'_, Message> {
         match &self.screen {
             Screen::List => self.list(),
-            Screen::Edit(form) => self.edit(form),
+            Screen::Edit(form) if form.id.is_some() => self.edit(form),
+            Screen::Edit(_) => self.list(),
             Screen::ConfirmRemove(id) => self.confirm(*id),
         }
+    }
+
+    pub fn add_dialog(&self) -> Option<Element<'_, Message>> {
+        let Screen::Edit(form) = &self.screen else {
+            return None;
+        };
+        if form.id.is_some() {
+            return None;
+        }
+        let editable = !self.is_busy();
+        Some(
+            widget::dialog()
+                .title(fl!("account-add"))
+                .width(Length::Fill)
+                .max_width(520)
+                .control(widget::scrollable(self.fields(form)).height(Length::Shrink))
+                .tertiary_action(
+                    widget::button::text(fl!("account-check"))
+                        .on_press_maybe(editable.then_some(Message::Check)),
+                )
+                .secondary_action(
+                    widget::button::standard(fl!("account-cancel"))
+                        .on_press_maybe(editable.then_some(Message::Back)),
+                )
+                .primary_action(
+                    widget::button::suggested(fl!("account-save"))
+                        .on_press_maybe(editable.then_some(Message::Save)),
+                )
+                .into(),
+        )
     }
 
     fn list(&self) -> Element<'_, Message> {
@@ -51,9 +82,9 @@ impl Accounts {
             .into()
     }
 
-    fn edit<'a>(&'a self, form: &'a Form) -> Element<'a, Message> {
+    fn fields<'a>(&'a self, form: &'a Form) -> Element<'a, Message> {
         let editable = !self.is_busy();
-        let fields = widget::column::with_capacity(8)
+        widget::column::with_capacity(8)
             .push(field(
                 fl!("account-email"),
                 &form.email,
@@ -97,19 +128,21 @@ impl Accounts {
                 editable,
             ))
             .push(
-                widget::toggler(form.smtp_starttls)
-                    .label(fl!("account-starttls"))
-                    .on_toggle_maybe(editable.then_some(Message::StartTlsChanged)),
+                widget::settings::item::builder(fl!("account-starttls")).control(
+                    widget::toggler(form.smtp_starttls)
+                        .on_toggle_maybe(editable.then_some(Message::StartTlsChanged)),
+                ),
             )
             .push(self.status_text())
-            .spacing(10);
+            .spacing(10)
+            .into()
+    }
+
+    fn edit<'a>(&'a self, form: &'a Form) -> Element<'a, Message> {
+        let editable = !self.is_busy();
         widget::settings::section()
-            .title(if form.id.is_some() {
-                fl!("account-edit")
-            } else {
-                fl!("account-add")
-            })
-            .add(fields)
+            .title(fl!("account-edit"))
+            .add(self.fields(form))
             .add(
                 widget::row::with_children([
                     widget::button::standard(fl!("account-back"))
