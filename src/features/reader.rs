@@ -383,11 +383,11 @@ impl Reader {
             .width(Length::Fill)
             .spacing(2);
         if !mail.address.is_empty() && mail.address != mail.sender {
-            sender = sender.push(address_menu(&mail.address, &mail.address));
+            sender = sender.push(address_menu(&mail.address, &mail.address, false));
         } else if !mail.address.is_empty() {
             sender = widget::column::with_capacity(1)
                 .width(Length::Fill)
-                .push(address_menu(&mail.address, &mail.address));
+                .push(address_menu(&mail.address, &mail.address, false));
         }
 
         let sender: Element<_> = if config.show_recipient_pictures {
@@ -455,9 +455,11 @@ impl Reader {
         .spacing(4)
         .wrap();
 
-        let mut recipient_row = widget::row::with_capacity(recipients.len() + 1).spacing(4);
+        let mut recipient_row = widget::row::with_capacity(recipients.len() + 1)
+            .align_y(cosmic::iced::Alignment::Center)
+            .spacing(4);
         if !recipients.is_empty() {
-            recipient_row = recipient_row.push(widget::text::caption(fl!("recipient")));
+            recipient_row = recipient_row.push(widget::text::body(fl!("recipient")));
             for recipient in recipients {
                 let label = match (recipient.name.as_str(), recipient.address.as_str()) {
                     ("", address) => address.to_owned(),
@@ -466,9 +468,9 @@ impl Reader {
                     (name, address) => format!("{name} <{address}>"),
                 };
                 recipient_row = recipient_row.push(if recipient.address.is_empty() {
-                    widget::text::caption(label).into()
+                    widget::text::body(label).into()
                 } else {
-                    address_menu(label, &recipient.address)
+                    address_menu(label, &recipient.address, true)
                 });
             }
         }
@@ -598,16 +600,29 @@ fn action_button(
     }
 }
 
-fn address_menu(label: impl Into<String>, address: &str) -> Element<'static, Message> {
+fn address_menu(
+    label: impl Into<String>,
+    address: &str,
+    recipient: bool,
+) -> Element<'static, Message> {
     let label =
         cosmic::iced::widget::rich_text::<(), _, _, _>([
             cosmic::iced::widget::span(label.into()).underline(true)
         ])
         .class(cosmic::theme::Text::Accent);
+    let label = if recipient {
+        label
+            .size(14.0)
+            .line_height(cosmic::iced::widget::text::LineHeight::Absolute(
+                21.0.into(),
+            ))
+    } else {
+        label
+    };
     let root = Element::from(
         widget::button::custom(label)
             .class(cosmic::theme::Button::MenuRoot)
-            .padding([2, 4])
+            .padding(if recipient { [0, 0] } else { [2, 4] })
             .force_enabled(true),
     );
     dropdown_menu(
