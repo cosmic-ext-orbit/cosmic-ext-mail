@@ -13,7 +13,15 @@ use servo::{
     WebViewPoint, WheelDelta, WheelEvent, WheelMode,
 };
 
-pub(super) struct Pane<'a>(pub(super) &'a EmailView);
+pub(super) enum Appearance {
+    Fixed,
+    Themed(Option<bool>),
+}
+
+pub(super) struct Pane<'a> {
+    pub(super) preview: &'a EmailView,
+    pub(super) appearance: Appearance,
+}
 
 impl<Message> Widget<Message, Theme, Renderer> for Pane<'_> {
     fn size(&self) -> Size<Length> {
@@ -28,18 +36,22 @@ impl<Message> Widget<Message, Theme, Renderer> for Pane<'_> {
         &self,
         _: &Tree,
         renderer: &mut Renderer,
-        _: &Theme,
+        theme: &Theme,
         style: &renderer::Style,
         layout: Layout<'_>,
         _: mouse::Cursor,
         viewport: &Rectangle,
     ) {
+        if let Appearance::Themed(dark_override) = self.appearance {
+            self.preview
+                .set_dark_mode(dark_override.unwrap_or(theme.cosmic().is_dark));
+        }
         let scale = style.scale_factor as f32;
-        if self.0.scale.replace(scale) != scale {
-            self.0.runtime.wake();
+        if self.preview.scale.replace(scale) != scale {
+            self.preview.runtime.wake();
         }
         let bounds = layout.bounds();
-        if let Some(frame) = self.0.frame.borrow().as_ref()
+        if let Some(frame) = self.preview.frame.borrow().as_ref()
             && let Some(clip) = bounds.intersection(viewport)
         {
             renderer.draw_image(image::Image::new(frame.handle().clone()), bounds, clip);
@@ -57,7 +69,7 @@ impl<Message> Widget<Message, Theme, Renderer> for Pane<'_> {
         shell: &mut Shell<'_, Message>,
         _: &Rectangle,
     ) {
-        let preview = self.0;
+        let preview = self.preview;
         let bounds = layout.bounds();
         let inside = cursor.is_over(bounds);
         let scale = preview.scale.get();
@@ -145,7 +157,7 @@ impl<Message> Widget<Message, Theme, Renderer> for Pane<'_> {
         if !cursor.is_over(layout.bounds()) {
             return mouse::Interaction::None;
         }
-        match self.0.delegate.cursor.get() {
+        match self.preview.delegate.cursor.get() {
             servo::Cursor::Text | servo::Cursor::VerticalText => mouse::Interaction::Text,
             servo::Cursor::Pointer => mouse::Interaction::Pointer,
             _ => mouse::Interaction::Idle,

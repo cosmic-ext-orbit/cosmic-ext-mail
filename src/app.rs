@@ -986,6 +986,7 @@ impl AppModel {
                     .map(|message| Message::List(message).into());
             }
             reader::Message::ShowRemoteImages => self.reader.set_remote_images(true),
+            reader::Message::SetTheme(id, dark) => self.reader.set_theme(id, dark),
             reader::Message::Retry => return self.load_body(),
             reader::Message::Loaded(request, result) => {
                 self.reader

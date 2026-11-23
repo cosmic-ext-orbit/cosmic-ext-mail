@@ -49,7 +49,7 @@ impl Folder {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MailId {
     pub account: Uuid,
     pub folder: String,

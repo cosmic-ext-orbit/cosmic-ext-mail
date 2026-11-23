@@ -27,12 +27,31 @@ const READER_STYLES: &str = "
     }
 ";
 
+// Convert sender-defined colors too, and reverse the filter on foreground image elements.
+const DARK_READER_STYLES: &str = "
+    html {
+        color-scheme: only light !important;
+        /* The viewport canvas is outside the body filter. */
+        background-color: black !important;
+    }
+    body {
+        background-color: white;
+        color: black;
+        filter: invert(1) hue-rotate(180deg) !important;
+    }
+    :is(img, svg):not(svg svg, svg img) {
+        filter: hue-rotate(180deg) invert(1) !important;
+    }
+";
+
 /// A live, read-only COSMIC pane for HTML, plain text, or raw MIME email.
 pub struct EmailView {
     webview: WebView,
     runtime: Rc<Runtime>,
     context: Rc<SoftwareRenderingContext>,
     delegate: Rc<Delegate>,
+    content_manager: Rc<UserContentManager>,
+    dark_styles: RefCell<Option<Rc<UserStyleSheet>>>,
     frame: RefCell<Option<image::Allocation>>,
     scale: Cell<f32>,
     focused: Cell<bool>,
@@ -48,6 +67,14 @@ impl EmailView {
     pub fn new_with_remote_images(
         body: EmailBody<'_>,
         remote_images: bool,
+    ) -> Result<Self, String> {
+        Self::new_with_appearance(body, remote_images, false)
+    }
+
+    pub fn new_with_appearance(
+        body: EmailBody<'_>,
+        remote_images: bool,
+        dark_mode: bool,
     ) -> Result<Self, String> {
         let html = body.into_html()?;
         let context = Rc::new(
@@ -66,8 +93,13 @@ impl EmailView {
             READER_STYLES.into(),
             url.clone(),
         )));
+        let dark_styles = dark_mode.then(|| {
+            let stylesheet = Rc::new(UserStyleSheet::new(DARK_READER_STYLES.into(), url.clone()));
+            content_manager.add_stylesheet(stylesheet.clone());
+            stylesheet
+        });
         let webview = WebViewBuilder::new(&runtime.servo, context.clone())
-            .user_content_manager(content_manager)
+            .user_content_manager(content_manager.clone())
             .url(url)
             .delegate(delegate.clone())
             .clipboard_delegate(delegate.clone())
@@ -79,6 +111,8 @@ impl EmailView {
             runtime,
             context,
             delegate,
+            content_manager,
+            dark_styles: RefCell::new(dark_styles),
             frame: RefCell::new(None),
             scale: Cell::new(1.0),
             focused: Cell::new(false),
@@ -104,6 +138,25 @@ impl EmailView {
         Ok(())
     }
 
+    /// Toggles the reader's dark appearance without changing the message or image policy.
+    fn set_dark_mode(&self, enabled: bool) {
+        let mut dark_styles = self.dark_styles.borrow_mut();
+        if enabled == dark_styles.is_some() {
+            return;
+        }
+        let url = self.runtime.message_url();
+        if enabled {
+            let stylesheet = Rc::new(UserStyleSheet::new(DARK_READER_STYLES.into(), url.clone()));
+            self.content_manager.add_stylesheet(stylesheet.clone());
+            *dark_styles = Some(stylesheet);
+        } else if let Some(stylesheet) = dark_styles.take() {
+            self.content_manager.remove_stylesheet(stylesheet);
+        }
+        self.delegate
+            .reload_at(url.clone(), self.remote_images_enabled());
+        self.load(url);
+    }
+
     /// Allows external images for the current message and reloads it.
     pub fn show_remote_images(&mut self) {
         self.set_remote_images(true);
@@ -113,7 +166,7 @@ impl EmailView {
     pub fn set_remote_images(&mut self, enabled: bool) {
         if enabled != self.remote_images_enabled() {
             let url = self.runtime.message_url();
-            self.delegate.set_remote_images(url.clone(), enabled);
+            self.delegate.reload_at(url.clone(), enabled);
             self.load(url);
         }
     }
@@ -122,15 +175,26 @@ impl EmailView {
         self.delegate.remote_images_enabled()
     }
 
-    fn load(&mut self, url: url::Url) {
-        self.frame.get_mut().take();
+    fn load(&self, url: url::Url) {
+        self.frame.borrow_mut().take();
         self.dragging.set(false);
         self.webview.load(url);
         self.runtime.wake();
     }
 
     pub fn view<Message>(&self) -> Element<'_, Message> {
-        Element::new(Pane(self))
+        Element::new(Pane {
+            preview: self,
+            appearance: pane::Appearance::Fixed,
+        })
+    }
+
+    /// Renders message bodies using the COSMIC theme of the enclosing window.
+    pub fn view_themed<Message>(&self, dark_override: Option<bool>) -> Element<'_, Message> {
+        Element::new(Pane {
+            preview: self,
+            appearance: pane::Appearance::Themed(dark_override),
+        })
     }
 
     /// Map this wake subscription into the host application's message type.

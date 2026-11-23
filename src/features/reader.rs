@@ -2,7 +2,7 @@
 
 use crate::{
     config::{Config, MessageActions},
-    features::mailbox::{Contact, Folder, Mail, remote},
+    features::mailbox::{Contact, Folder, Mail, MailId, remote},
     fl,
 };
 use cosmic::widget::menu;
@@ -13,7 +13,7 @@ use cosmic::{
 };
 use cosmic_ext_mail::{EmailBody, EmailView};
 use mail_parser::MessageParser;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 const INLINE_ACTIONS_MIN_WIDTH: f32 = 520.0;
 
@@ -23,6 +23,7 @@ pub enum Message {
     BackToList,
     Retry,
     ShowRemoteImages,
+    SetTheme(MailId, Option<bool>),
     Loaded(u64, Result<Arc<[u8]>, remote::Error>),
     Reply,
     Forward,
@@ -62,6 +63,7 @@ impl ComposeDetails {
 
 pub struct Reader {
     email: Option<EmailView>,
+    theme_overrides: HashMap<MailId, bool>,
     body: Body,
     request: u64,
     recipients: Vec<Contact>,
@@ -82,6 +84,7 @@ impl Reader {
     pub fn new() -> Self {
         Self {
             email: None,
+            theme_overrides: HashMap::new(),
             body: Body::Empty,
             request: 0,
             recipients: Vec::new(),
@@ -151,7 +154,11 @@ impl Reader {
             if let Some(view) = &mut self.email {
                 view.set_body_with_remote_images(body, load_remote_images)?;
             } else {
-                self.email = Some(EmailView::new_with_remote_images(body, load_remote_images)?);
+                self.email = Some(EmailView::new_with_appearance(
+                    body,
+                    load_remote_images,
+                    cosmic::theme::is_dark(),
+                )?);
             }
             Ok(())
         });
@@ -166,6 +173,14 @@ impl Reader {
             && let Some(view) = &mut self.email
         {
             view.set_remote_images(enabled);
+        }
+    }
+
+    pub fn set_theme(&mut self, id: MailId, dark: Option<bool>) {
+        if let Some(dark) = dark {
+            self.theme_overrides.insert(id, dark);
+        } else {
+            self.theme_overrides.remove(&id);
         }
     }
 
@@ -207,10 +222,7 @@ impl Reader {
         config: &'a Config,
         photos: Option<&'a crate::features::avatars::Avatars>,
     ) -> Element<'a, Message> {
-        let mut page = widget::column::with_capacity(4)
-            .spacing(8)
-            .padding(12)
-            .height(Length::Fill);
+        let mut page = widget::column::with_capacity(4).spacing(8).padding(12);
         if narrow {
             page =
                 page.push(widget::button::text(fl!("back-to-list")).on_press(Message::BackToList));
@@ -219,29 +231,39 @@ impl Reader {
         let Some(mail) = mail else {
             return page.push(widget::text::body(fl!("select-message"))).into();
         };
-        let body: Element<_> = match &self.body {
-            Body::Ready => self.email.as_ref().expect("ready email view").view(),
-            Body::Failed(error) => widget::column::with_capacity(2)
+        let page = page
+            .push(
+                widget::responsive(move |size| {
+                    self.header(
+                        mail,
+                        folder,
+                        config,
+                        photos.and_then(|photos| photos.get(&mail.address)),
+                        size.width,
+                    )
+                })
+                .height(Length::Shrink),
+            )
+            .push(widget::divider::horizontal::default());
+        match &self.body {
+            Body::Ready => widget::column::with_capacity(2)
+                .push(page)
+                .push(
+                    self.email
+                        .as_ref()
+                        .expect("ready email view")
+                        .view_themed(self.theme_overrides.get(&mail.id).copied()),
+                )
+                .height(Length::Fill)
+                .into(),
+            Body::Failed(error) => page
                 .push(widget::text(fl!("preview-failed", error = error.as_str())))
                 .push(widget::button::text(fl!("mail-retry")).on_press(Message::Retry))
                 .into(),
-            Body::Empty | Body::Loading => widget::text::body(fl!("mail-body-loading")).into(),
-        };
-        page.push(
-            widget::responsive(move |size| {
-                self.header(
-                    mail,
-                    folder,
-                    config,
-                    photos.and_then(|photos| photos.get(&mail.address)),
-                    size.width,
-                )
-            })
-            .height(Length::Shrink),
-        )
-        .push(widget::divider::horizontal::default())
-        .push(body)
-        .into()
+            Body::Empty | Body::Loading => page
+                .push(widget::text::body(fl!("mail-body-loading")))
+                .into(),
+        }
     }
 
     fn header<'a>(
@@ -400,6 +422,24 @@ impl Reader {
                 fl!("mail-show-remote-images"),
                 Some(Message::ShowRemoteImages),
             ));
+        }
+        if matches!(self.body, Body::Ready) {
+            let theme_override = self.theme_overrides.get(&mail.id).copied();
+            let is_dark = theme_override.unwrap_or_else(cosmic::theme::is_dark);
+            items.push((
+                if is_dark {
+                    fl!("mail-use-light-theme")
+                } else {
+                    fl!("mail-use-dark-theme")
+                },
+                Some(Message::SetTheme(mail.id.clone(), Some(!is_dark))),
+            ));
+            if theme_override.is_some() {
+                items.push((
+                    fl!("mail-use-desktop-theme"),
+                    Some(Message::SetTheme(mail.id.clone(), None)),
+                ));
+            }
         }
         let root = action_button(
             style,

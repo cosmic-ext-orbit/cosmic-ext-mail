@@ -113,6 +113,9 @@ mail-too-large = This message exceeds the 25 MiB preview limit.
 mail-unknown-sender = Unknown sender
 mail-no-subject = (No subject)
 mail-show-remote-images = Load remote images
+mail-use-dark-theme = Use dark theme
+mail-use-light-theme = Use light theme
+mail-use-desktop-theme = Follow desktop theme
 
 message-actions = Message action buttons
 message-actions-icon-only = Icon only

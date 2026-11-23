@@ -140,10 +140,10 @@ impl Delegate {
         self.document.borrow().remote_images
     }
 
-    pub(super) fn set_remote_images(&self, url: Url, enabled: bool) {
+    pub(super) fn reload_at(&self, url: Url, remote_images: bool) {
         let mut document = self.document.borrow_mut();
         document.url = url;
-        document.remote_images = enabled;
+        document.remote_images = remote_images;
         self.frame_ready.set(false);
         self.copied.borrow_mut().take();
     }
