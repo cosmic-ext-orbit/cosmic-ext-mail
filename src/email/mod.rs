@@ -14,10 +14,18 @@ use pane::Pane;
 use runtime::Runtime;
 use servo::{
     DeviceIntPoint, DeviceIntRect, DeviceIntSize, RenderingContext, SoftwareRenderingContext,
-    WebView, WebViewBuilder,
+    UserContentManager, WebView, WebViewBuilder, user_contents::UserStyleSheet,
 };
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+
+// Center outer layout boxes while leaving sender-defined styles and nested tables in control.
+const READER_STYLES: &str = "
+    body > :is(div, main, section):not([align]),
+    table:not(table table, [align]) {
+        margin-inline: auto;
+    }
+";
 
 /// A live, read-only COSMIC pane for HTML, plain text, or raw MIME email.
 pub struct EmailView {
@@ -53,7 +61,13 @@ impl EmailView {
         let runtime = Runtime::shared();
         let url = runtime.message_url();
         let delegate = Rc::new(Delegate::new(url.clone(), html, remote_images));
+        let content_manager = Rc::new(UserContentManager::new(&runtime.servo));
+        content_manager.add_stylesheet(Rc::new(UserStyleSheet::new(
+            READER_STYLES.into(),
+            url.clone(),
+        )));
         let webview = WebViewBuilder::new(&runtime.servo, context.clone())
+            .user_content_manager(content_manager)
             .url(url)
             .delegate(delegate.clone())
             .clipboard_delegate(delegate.clone())
