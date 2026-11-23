@@ -5,7 +5,7 @@ mod document;
 mod pane;
 mod runtime;
 
-pub use body::EmailBody;
+pub use body::{EmailBody, PreparedEmail};
 use cosmic::iced::advanced::image::{self, Renderer as _};
 use cosmic::iced::{Rectangle, Subscription};
 use cosmic::{Element, Renderer};
@@ -76,7 +76,16 @@ impl EmailView {
         remote_images: bool,
         dark_mode: bool,
     ) -> Result<Self, String> {
-        let html = body.into_html()?;
+        Self::from_prepared(body.prepare()?, remote_images, dark_mode)
+    }
+
+    /// Creates a preview from content prepared off the UI thread.
+    pub fn from_prepared(
+        body: PreparedEmail,
+        remote_images: bool,
+        dark_mode: bool,
+    ) -> Result<Self, String> {
+        let PreparedEmail(html) = body;
         let context = Rc::new(
             SoftwareRenderingContext::new((640_u32, 420_u32).into()).map_err(|error| {
                 format!("Could not create Servo's rendering context: {error:?}")
@@ -130,12 +139,17 @@ impl EmailView {
         body: EmailBody<'_>,
         remote_images: bool,
     ) -> Result<(), String> {
-        let html = body.into_html()?;
+        self.set_prepared(body.prepare()?, remote_images);
+        Ok(())
+    }
+
+    /// Displays previously prepared content in this preview.
+    pub fn set_prepared(&mut self, body: PreparedEmail, remote_images: bool) {
+        let PreparedEmail(html) = body;
         let url = self.runtime.message_url();
         self.delegate
             .replace_document(url.clone(), html, remote_images);
         self.load(url);
-        Ok(())
     }
 
     /// Toggles the reader's dark appearance without changing the message or image policy.

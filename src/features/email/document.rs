@@ -5,12 +5,15 @@ use servo::{
     ClipboardDelegate, LoadStatus, NavigationRequest, ServoDelegate, WebResourceLoad,
     WebResourceResponse, WebView, WebViewDelegate,
 };
-use std::cell::{Cell, RefCell};
+use std::{
+    cell::{Cell, RefCell},
+    sync::Arc,
+};
 use url::Url;
 
 struct Document {
     url: Url,
-    html: String,
+    html: Arc<str>,
     remote_images: bool,
 }
 
@@ -113,7 +116,7 @@ impl ClipboardDelegate for Delegate {
 }
 
 impl Delegate {
-    pub(super) fn new(url: Url, html: String, remote_images: bool) -> Self {
+    pub(super) fn new(url: Url, html: Arc<str>, remote_images: bool) -> Self {
         Self {
             document: RefCell::new(Document {
                 url,
@@ -126,7 +129,7 @@ impl Delegate {
         }
     }
 
-    pub(super) fn replace_document(&self, url: Url, html: String, remote_images: bool) {
+    pub(super) fn replace_document(&self, url: Url, html: Arc<str>, remote_images: bool) {
         *self.document.borrow_mut() = Document {
             url,
             html,

@@ -2,13 +2,10 @@
 
 use super::html::plain_text_html;
 use base64::{Engine, engine::general_purpose::STANDARD};
-use mail_parser::{MessageParser, MessagePart};
+use mail_parser::{Message, MessagePart};
 use std::collections::HashMap;
 
-pub(super) fn decode(raw: &[u8]) -> Result<(String, HashMap<String, String>), String> {
-    let message = MessageParser::new()
-        .parse(raw)
-        .ok_or("Could not parse the MIME message")?;
+pub(super) fn decode(message: &Message<'_>) -> (String, HashMap<String, String>) {
     let mut images = HashMap::new();
     for part in message.root().parts() {
         let id = part.content_id();
@@ -33,7 +30,7 @@ pub(super) fn decode(raw: &[u8]) -> Result<(String, HashMap<String, String>), St
         html = plain_text_html(&text);
     }
 
-    Ok((html, images))
+    (html, images)
 }
 
 fn inline_image(part: MessagePart<'_>) -> Option<String> {

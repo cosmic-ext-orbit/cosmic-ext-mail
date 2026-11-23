@@ -1,28 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-use super::{CONTENT_GUTTER, Folder, Mail, MailId, Mailbox, SortOrder, Status, remote};
+use super::{CONTENT_GUTTER, Change, Folder, Mail, Mailbox, Message, SortOrder, Status};
 use crate::fl;
 use cosmic::iced::{Length, window};
 use cosmic::widget::menu;
 use cosmic::{Element, widget};
-
-#[derive(Clone, Debug)]
-pub enum Message {
-    Select(usize),
-    RowAction(MailId, RowAction),
-    MenuSurface(cosmic::surface::Action<Message>),
-    Step(isize),
-    TurnPage(isize),
-    OpenSelected,
-    Scrolled(f32),
-    ResumeDraft(uuid::Uuid),
-    Refresh,
-    Sort(SortOrder),
-    AddAccount,
-    Cached(u64, Option<remote::FolderContents>),
-    Loaded(u64, remote::FolderContents),
-    Download(u64, Option<remote::DownloadEvent>),
-}
 
 #[derive(Clone, Copy, Debug)]
 pub enum ComposeAction {
@@ -37,7 +19,7 @@ pub enum RowAction {
     CopySender,
     ConfirmPermanentDelete,
     ComposeToSender,
-    Change(remote::Change),
+    Change(Change),
 }
 
 impl Mailbox {
@@ -256,7 +238,7 @@ impl Mailbox {
                 } else {
                     fl!("mark-message-unread")
                 },
-                Change(remote::Change::Seen(mail.unread)),
+                Change(super::Change::Seen(mail.unread)),
             ),
             item(
                 if mail.flagged {
@@ -264,14 +246,14 @@ impl Mailbox {
                 } else {
                     fl!("star-message")
                 },
-                Change(remote::Change::Flagged(!mail.flagged)),
+                Change(super::Change::Flagged(!mail.flagged)),
             ),
             divider(),
         ]);
         if matches!(self.folder, Folder::Archive | Folder::Junk | Folder::Trash) {
             items.push(item(
                 fl!("mail-move-to-inbox"),
-                Change(remote::Change::Move(Folder::Inbox)),
+                Change(super::Change::Move(Folder::Inbox)),
             ));
         }
         for (folder, label) in [
@@ -280,7 +262,7 @@ impl Mailbox {
             (Folder::Trash, fl!("delete-message")),
         ] {
             if folder != self.folder {
-                items.push(item(label, Change(remote::Change::Move(folder))));
+                items.push(item(label, Change(super::Change::Move(folder))));
             }
         }
 

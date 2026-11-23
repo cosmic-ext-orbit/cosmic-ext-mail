@@ -58,12 +58,6 @@ pub enum Message {
     Shortcut(shortcuts::Action),
     List(mailbox::Message),
     Reader(reader::Message),
-    MailChanged(
-        mailbox::Folder,
-        mailbox::MailId,
-        mailbox::remote::Change,
-        Result<(), mailbox::remote::Error>,
-    ),
     CloseToast(widget::ToastId),
     ResolvePermanentDelete(bool),
     MenuSurface(cosmic::surface::Action<Message>),
@@ -393,37 +387,11 @@ impl cosmic::Application for AppModel {
                     && confirmed
                     && self.mailbox.folder() == mailbox::Folder::Trash
                 {
-                    return self.change_mail(id, mailbox::remote::Change::DeletePermanently);
+                    return self.change_mail(id, mailbox::Change::DeletePermanently);
                 }
             }
             Message::CloseToast(id) => self.toasts.remove(id),
             Message::MenuSurface(action) => return cosmic::surface::surface_task(action),
-            Message::MailChanged(source, id, change, result) => {
-                let completion = self.mailbox.finish_change(&id, result.is_ok());
-                if let Some(next) = completion.next {
-                    let toast = result
-                        .err()
-                        .map_or_else(Task::none, |error| self.mail_action_error(error.text()));
-                    return Task::batch([toast, self.send_mail_change(source, id, next)]);
-                }
-                if let Err(error) = result {
-                    let toast = self.mail_action_error(error.text());
-                    if completion.restored_selection {
-                        self.reader.set_open(true);
-                        return Task::batch([toast, self.load_body()]);
-                    }
-                    return toast;
-                }
-                let current = self.mailbox.folder();
-                if current == source
-                    || matches!(change, mailbox::remote::Change::Move(destination) if current == destination)
-                {
-                    return self
-                        .mailbox
-                        .refresh_after_change(&self.accounts)
-                        .map(|message| Message::List(message).into());
-                }
-            }
             Message::Composer(message) => {
                 if matches!(
                     message,
@@ -841,11 +809,9 @@ impl AppModel {
                     Action::Reply => RowAction::Compose(ComposeAction::Reply),
                     Action::Forward => RowAction::Compose(ComposeAction::Forward),
                     Action::CopySender if !mail.address.is_empty() => RowAction::CopySender,
-                    Action::ToggleRead => {
-                        RowAction::Change(mailbox::remote::Change::Seen(mail.unread))
-                    }
+                    Action::ToggleRead => RowAction::Change(mailbox::Change::Seen(mail.unread)),
                     Action::ToggleStar => {
-                        RowAction::Change(mailbox::remote::Change::Flagged(!mail.flagged))
+                        RowAction::Change(mailbox::Change::Flagged(!mail.flagged))
                     }
                     Action::Move(mailbox::Folder::Trash)
                         if self.mailbox.folder() == mailbox::Folder::Trash =>
@@ -853,7 +819,7 @@ impl AppModel {
                         RowAction::ConfirmPermanentDelete
                     }
                     Action::Move(folder) if self.mailbox.folder() != folder => {
-                        RowAction::Change(mailbox::remote::Change::Move(folder))
+                        RowAction::Change(mailbox::Change::Move(folder))
                     }
                     _ => return Task::none(),
                 };
@@ -879,6 +845,25 @@ impl AppModel {
 
     fn update_list(&mut self, message: mailbox::Message) -> Task<Message> {
         match message {
+            mailbox::Message::Changed(folder, id, change, result) => {
+                let outcome =
+                    self.mailbox
+                        .complete_change(&self.accounts, folder, id, change, result);
+                let toast = outcome
+                    .error
+                    .map_or_else(Task::none, |error| self.mail_action_error(error.text()));
+                let reader = if outcome.reload_reader {
+                    self.reader.set_open(true);
+                    self.load_body()
+                } else {
+                    Task::none()
+                };
+                return Task::batch([
+                    outcome.task.map(|message| Message::List(message).into()),
+                    toast,
+                    reader,
+                ]);
+            }
             mailbox::Message::RowAction(id, action) => return self.update_row(id, action),
             mailbox::Message::MenuSurface(action) => {
                 return cosmic::surface::surface_task(action.map(Message::List));
@@ -1023,7 +1008,9 @@ impl AppModel {
                 Task::perform(
                     async move {
                         let bytes = mailbox::remote::body(account, id).await?;
-                        Ok(reader::ComposeDetails::parse(&bytes))
+                        tokio::task::spawn_blocking(move || reader::ComposeDetails::parse(&bytes))
+                            .await
+                            .map_err(|_| mailbox::remote::Error::Fetch)
                     },
                     move |result| {
                         Message::RowComposeLoaded {
@@ -1200,13 +1187,13 @@ impl AppModel {
         };
         self.reader.set_open(true);
         if mail.unread {
-            self.change_selected(mailbox::remote::Change::Seen(true))
+            self.change_selected(mailbox::Change::Seen(true))
         } else {
             Task::none()
         }
     }
 
-    fn change_selected(&mut self, change: mailbox::remote::Change) -> Task<Message> {
+    fn change_selected(&mut self, change: mailbox::Change) -> Task<Message> {
         if let Some(mail) = self.mailbox.selected() {
             self.change_mail(mail.id.clone(), change)
         } else {
@@ -1214,50 +1201,14 @@ impl AppModel {
         }
     }
 
-    fn change_mail(
-        &mut self,
-        id: mailbox::MailId,
-        change: mailbox::remote::Change,
-    ) -> Task<Message> {
-        let closes_reader =
-            change.removes_message() && self.mailbox.selected().is_some_and(|mail| mail.id == id);
-        let source = self.mailbox.folder();
-        let request = match self.mailbox.begin_change(&id, change) {
-            mailbox::ChangeStart::Send => self.send_mail_change(source, id, change),
-            mailbox::ChangeStart::Queued => Task::none(),
-            mailbox::ChangeStart::Unavailable => return Task::none(),
-        };
+    fn change_mail(&mut self, id: mailbox::MailId, change: mailbox::Change) -> Task<Message> {
+        let (request, closes_reader) = self.mailbox.request_change(&self.accounts, id, change);
+        let request = request.map(|message| Message::List(message).into());
         if closes_reader {
             self.reader.set_open(false);
             return Task::batch([request, self.load_body()]);
         }
         request
-    }
-
-    fn send_mail_change(
-        &self,
-        source: mailbox::Folder,
-        id: mailbox::MailId,
-        change: mailbox::remote::Change,
-    ) -> Task<Message> {
-        let account = self
-            .accounts
-            .saved()
-            .ok()
-            .and_then(|accounts| accounts.iter().find(|account| account.id == id.account))
-            .cloned();
-        let Some(account) = account else {
-            return Task::done(cosmic::action::app(Message::MailChanged(
-                source,
-                id,
-                change,
-                Err(mailbox::remote::Error::MessageUnavailable),
-            )));
-        };
-        Task::perform(
-            mailbox::remote::change(account, source, id.clone(), change),
-            move |result| Message::MailChanged(source, id, change, result).into(),
-        )
     }
 
     fn mail_action_error(&mut self, error: String) -> Task<Message> {

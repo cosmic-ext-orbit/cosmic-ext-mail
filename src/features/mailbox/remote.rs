@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use super::{
-    Contact, Folder, Mail, MailId,
+    Change, Contact, Folder, Mail, MailId,
     cache::{self, Cache, Snapshot},
 };
 use crate::{
@@ -484,42 +484,7 @@ fn folder_name<'a>(
         .map(Name::name)
 }
 
-#[derive(Clone, Copy, Debug)]
-pub enum Change {
-    Move(Folder),
-    DeletePermanently,
-    Seen(bool),
-    Flagged(bool),
-}
-
-impl Change {
-    pub fn removes_message(self) -> bool {
-        matches!(self, Self::Move(_) | Self::DeletePermanently)
-    }
-
-    pub(super) fn affects(self, mail: &Mail) -> bool {
-        match self {
-            Self::Move(_) | Self::DeletePermanently => true,
-            Self::Seen(seen) => mail.unread == seen,
-            Self::Flagged(flagged) => mail.flagged != flagged,
-        }
-    }
-
-    pub(super) fn apply(self, messages: &mut Vec<Mail>, id: &MailId) {
-        let Some(index) = messages.iter().position(|mail| mail.id == *id) else {
-            return;
-        };
-        match self {
-            Self::Move(_) | Self::DeletePermanently => {
-                messages.remove(index);
-            }
-            Self::Seen(seen) => messages[index].unread = !seen,
-            Self::Flagged(flagged) => messages[index].flagged = flagged,
-        }
-    }
-}
-
-pub async fn change(
+pub(super) async fn change(
     account: Account,
     folder: Folder,
     id: MailId,

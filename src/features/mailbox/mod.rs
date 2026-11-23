@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
+mod actions;
 mod cache;
 mod list;
 mod model;
 mod notifications;
 pub mod remote;
 
-pub use list::{ComposeAction, Message, RowAction};
+pub use actions::Change;
+pub use list::{ComposeAction, RowAction};
 pub use model::{Contact, Folder, Mail, MailId};
 
 use cosmic::iced::{
@@ -17,6 +19,25 @@ use cosmic::widget::{self, nav_bar};
 
 const MESSAGES_PER_PAGE: usize = 50;
 pub const CONTENT_GUTTER: u16 = 8;
+
+#[derive(Clone, Debug)]
+pub enum Message {
+    Select(usize),
+    RowAction(MailId, RowAction),
+    MenuSurface(cosmic::surface::Action<Message>),
+    Step(isize),
+    TurnPage(isize),
+    OpenSelected,
+    Scrolled(f32),
+    ResumeDraft(uuid::Uuid),
+    Refresh,
+    Sort(SortOrder),
+    AddAccount,
+    Cached(u64, Option<remote::FolderContents>),
+    Loaded(u64, remote::FolderContents),
+    Download(u64, Option<remote::DownloadEvent>),
+    Changed(Folder, MailId, Change, Result<(), remote::Error>),
+}
 
 pub struct Mailbox {
     nav: nav_bar::Model,
@@ -34,7 +55,7 @@ pub struct Mailbox {
     downloads: Downloads,
     status: Status,
     contents: remote::FolderContents,
-    pending_changes: Vec<PendingChange>,
+    pending_changes: Vec<actions::PendingChange>,
 }
 
 struct Page {
@@ -42,40 +63,6 @@ struct Page {
     count: usize,
     drafts: std::ops::Range<usize>,
     messages: std::ops::Range<usize>,
-}
-
-struct PendingChange {
-    folder: Folder,
-    original: Mail,
-    change: remote::Change,
-    queued: Vec<remote::Change>,
-    was_selected: bool,
-}
-
-impl PendingChange {
-    fn apply(&self, messages: &mut Vec<Mail>) {
-        // A sync result can predate a change confirmed earlier in this queue.
-        if let Some(mail) = messages.iter_mut().find(|mail| mail.id == self.original.id) {
-            mail.unread = self.original.unread;
-            mail.flagged = self.original.flagged;
-        }
-        for change in std::iter::once(self.change).chain(self.queued.iter().copied()) {
-            change.apply(messages, &self.original.id);
-        }
-    }
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub enum ChangeStart {
-    Send,
-    Queued,
-    Unavailable,
-}
-
-#[derive(Default)]
-pub struct ChangeCompletion {
-    pub restored_selection: bool,
-    pub next: Option<remote::Change>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -188,7 +175,7 @@ impl Mailbox {
         self.start_sync(accounts, true, true)
     }
 
-    pub fn refresh_after_change(
+    fn refresh_after_change(
         &mut self,
         accounts: &crate::features::accounts::Accounts,
     ) -> cosmic::Task<Message> {
@@ -364,118 +351,6 @@ impl Mailbox {
             .and_then(|index| self.contents.messages.get(index))
     }
 
-    pub fn begin_change(&mut self, id: &MailId, change: remote::Change) -> ChangeStart {
-        let Some(index) = self.message_index(id) else {
-            return ChangeStart::Unavailable;
-        };
-        let original = &self.contents.messages[index];
-        if !change.affects(original) {
-            return ChangeStart::Unavailable;
-        }
-        let previous = self
-            .pending_changes
-            .iter_mut()
-            .find(|pending| pending.original.id == *id);
-        let was_selected = self.selected == Some(index);
-        let moving = change.removes_message();
-        let start = if let Some(pending) = previous {
-            pending
-                .queued
-                .retain(|queued| std::mem::discriminant(queued) != std::mem::discriminant(&change));
-            pending.queued.push(change);
-            if moving {
-                pending.was_selected = was_selected;
-            }
-            ChangeStart::Queued
-        } else {
-            self.pending_changes.push(PendingChange {
-                folder: self.folder,
-                original: original.clone(),
-                change,
-                queued: Vec::new(),
-                was_selected: moving && was_selected,
-            });
-            ChangeStart::Send
-        };
-
-        change.apply(&mut self.contents.messages, id);
-        if moving {
-            self.selected = self
-                .selected
-                .and_then(|selection| match selection.cmp(&index) {
-                    std::cmp::Ordering::Less => Some(selection),
-                    std::cmp::Ordering::Equal => None,
-                    std::cmp::Ordering::Greater => Some(selection - 1),
-                });
-        }
-        start
-    }
-
-    pub fn finish_change(&mut self, id: &MailId, succeeded: bool) -> ChangeCompletion {
-        use remote::Change;
-
-        let Some(index) = self
-            .pending_changes
-            .iter()
-            .position(|pending| pending.original.id == *id)
-        else {
-            return ChangeCompletion::default();
-        };
-        let mut pending = self.pending_changes.remove(index);
-        let move_failed = pending.change.removes_message() && !succeeded;
-        if succeeded {
-            match pending.change {
-                Change::Seen(seen) => pending.original.unread = !seen,
-                Change::Flagged(flagged) => pending.original.flagged = flagged,
-                Change::Move(_) | Change::DeletePermanently => return ChangeCompletion::default(),
-            }
-        }
-
-        // Skip queued toggles already satisfied by the last confirmed server state.
-        let next = pending
-            .queued
-            .iter()
-            .position(|change| change.affects(&pending.original))
-            .map(|index| {
-                pending
-                    .queued
-                    .drain(..=index)
-                    .last()
-                    .expect("queued change")
-            });
-        if let Some(change) = next {
-            pending.change = change;
-        }
-
-        let mut restored_selection = false;
-        if pending.folder == self.folder {
-            let selection = self.selected().map(|mail| mail.id.clone());
-            if let Some(index) = self.message_index(id) {
-                let mail = &mut self.contents.messages[index];
-                mail.unread = pending.original.unread;
-                mail.flagged = pending.original.flagged;
-            } else if move_failed {
-                self.contents.messages.push(pending.original.clone());
-                self.contents.sort();
-            }
-
-            if next.is_some() {
-                pending.apply(&mut self.contents.messages);
-            }
-            let restore = move_failed && pending.was_selected && selection.is_none();
-            let selected = selection.as_ref().or(restore.then_some(id));
-            self.selected = selected.and_then(|id| self.message_index(id));
-            restored_selection = restore && self.selected.is_some();
-        }
-        if next.is_some() {
-            self.pending_changes.push(pending);
-        }
-        ChangeCompletion {
-            restored_selection,
-            next,
-        }
-    }
-
     pub fn set_selection(&mut self, selection: Option<usize>) -> bool {
         if self.selected == selection
             || selection.is_some_and(|id| id >= self.contents.messages.len())
@@ -488,12 +363,10 @@ impl Mailbox {
 
     pub fn selection_for(&self, query: &str, drafts: usize) -> Option<usize> {
         if self.selected.is_none()
-            && self.pending_changes.iter().any(|pending| {
-                pending.folder == self.folder
-                    && pending.was_selected
-                    && (pending.change.removes_message()
-                        || pending.queued.iter().any(|change| change.removes_message()))
-            })
+            && self
+                .pending_changes
+                .iter()
+                .any(|pending| pending.removes_selection(self.folder))
         {
             return None;
         }
@@ -658,6 +531,7 @@ impl Mailbox {
 
 #[cfg(test)]
 mod tests {
+    use super::actions::ChangeStart;
     use super::*;
     use cosmic::iced::advanced::widget::{Tree, tree};
 
@@ -690,7 +564,7 @@ mod tests {
         mailbox.contents.messages = vec![target.clone(), other.clone()];
         assert!(mailbox.set_selection(Some(0)));
 
-        let change = remote::Change::DeletePermanently;
+        let change = Change::DeletePermanently;
         assert_eq!(mailbox.begin_change(&target.id, change), ChangeStart::Send);
         assert_eq!(mailbox.contents.messages.len(), 1);
         assert_eq!(mailbox.contents.messages[0].id, other.id);
@@ -708,8 +582,6 @@ mod tests {
 
     #[test]
     fn optimistic_changes_survive_stale_sync_and_rollback_the_affected_message() {
-        use remote::Change;
-
         let mut first = mail(1, "First");
         first.unread = true;
         let second = mail(2, "Second");
@@ -770,8 +642,6 @@ mod tests {
 
     #[test]
     fn queued_mail_actions_preserve_latest_intent_and_rollback_independently() {
-        use remote::Change;
-
         let mut original = mail(1, "Queued message");
         original.unread = true;
         let id = original.id.clone();
