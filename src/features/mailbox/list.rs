@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-use super::{Downloads, Folder, Mailbox, SortOrder, Status, VISIBLE_MESSAGE_LIMIT, remote};
+use super::{CONTENT_GUTTER, Folder, Mailbox, SortOrder, Status, VISIBLE_MESSAGE_LIMIT, remote};
 use crate::fl;
 use cosmic::iced::Length;
 use cosmic::{Element, widget};
@@ -82,9 +82,16 @@ impl Mailbox {
                     } else {
                         mail.sender.to_owned()
                     };
-                    let line = widget::row::with_capacity(2)
+                    let line = widget::row::with_capacity(3)
                         .push(widget::text::body(sender).width(Length::Fill))
-                        .push(widget::text::caption(mail.display_time()));
+                        .push_maybe(mail.flagged.then(|| {
+                            widget::icon::from_name("mail-mark-important-symbolic")
+                                .size(16)
+                                .icon()
+                        }))
+                        .push(widget::text::caption(mail.display_time()))
+                        .align_y(cosmic::iced::Alignment::Center)
+                        .spacing(4);
                     let subject = if mail.unread {
                         widget::text::body(mail.subject.as_str()).font(cosmic::font::bold())
                     } else {
@@ -140,27 +147,22 @@ impl Mailbox {
             ))
             .push(
                 widget::button::icon(widget::icon::from_name("view-refresh-symbolic"))
-                    .tooltip(fl!("mail-refresh"))
+                    .tooltip(if self.syncing {
+                        fl!("mail-refresh-syncing")
+                    } else {
+                        fl!("mail-refresh")
+                    })
                     .on_press_maybe(
                         (!self.syncing && matches!(self.status, Status::Loaded))
                             .then_some(Message::Refresh),
                     ),
             )
             .align_y(cosmic::iced::Alignment::Center);
-        let mut content = widget::column::with_capacity(4).push(header);
-        if self.downloads.active > 0 {
-            let Downloads { saved, total, .. } = self.downloads;
-            content = content
-                .push(widget::text::caption(fl!(
-                    "mail-download-progress",
-                    saved = saved,
-                    total = total
-                )))
-                .push(widget::determinate_linear(saved as f32 / total as f32).width(Length::Fill));
-        }
-        let content = content
+        let content = widget::column::with_capacity(2)
+            .push(header)
             .push(
                 widget::scrollable(rows)
+                    .spacing(CONTENT_GUTTER)
                     .id(self.list_id.clone())
                     .height(Length::Fill)
                     .on_scroll(|viewport| Message::Scrolled(viewport.absolute_offset().y)),
@@ -175,7 +177,7 @@ impl Mailbox {
             .height(Length::Fill);
 
         widget::container(card)
-            .padding(8)
+            .padding(CONTENT_GUTTER)
             .width(Length::Fill)
             .height(Length::Fill)
             .into()

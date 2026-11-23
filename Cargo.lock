@@ -1626,6 +1626,7 @@ dependencies = [
  "urlencoding",
  "uuid 1.29.3",
  "xdgen",
+ "zbus 5.19.0",
 ]
 
 [[package]]

@@ -75,6 +75,18 @@ mail-visible-limit = Showing the first { $count } results.
 mail-download-progress = Downloading messages for offline use ({ $saved } of { $total })
 mail-body-loading = Loading message…
 mail-refresh = Refresh
+mail-refresh-syncing = Checking for mail…
+mail-checking-inbox = Checking Inbox for new mail…
+mail-status-idle = Ready
+mail-status-no-accounts = No mail accounts
+mail-status-sync-failed = Some mail could not be synced
+mail-status-inbox-failed = Could not check the Inbox
+mail-quit = Quit Mail
+mail-new-notification = New mail
+mail-new-notification-count = { $count ->
+    [one] One new message
+   *[other] { $count } new messages
+}
 mail-sort-newest-first = Newest first
 mail-sort-oldest-first = Oldest first
 mail-retry = Retry

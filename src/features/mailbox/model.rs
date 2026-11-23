@@ -39,10 +39,10 @@ impl Folder {
 
     pub fn icon(self) -> &'static str {
         match self {
-            Self::Inbox => "mail-inbox-symbolic",
-            Self::Drafts => "document-edit-symbolic",
-            Self::Sent => "mail-outbox-symbolic",
-            Self::Archive => "folder-symbolic",
+            Self::Inbox => "mail-folder-inbox-symbolic",
+            Self::Drafts => "document-new-symbolic",
+            Self::Sent => "mail-send-symbolic",
+            Self::Archive => "mail-archive-symbolic",
             Self::Junk => "mail-mark-junk-symbolic",
             Self::Trash => "user-trash-symbolic",
         }

@@ -197,6 +197,10 @@ impl Default for Composer {
 }
 
 impl Composer {
+    pub fn is_sending(&self) -> bool {
+        self.active.as_ref().is_some_and(|session| session.sending)
+    }
+
     pub fn is_open(&self) -> bool {
         self.active.is_some()
     }

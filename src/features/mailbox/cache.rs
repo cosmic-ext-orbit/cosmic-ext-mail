@@ -14,6 +14,14 @@ use std::{
 #[derive(Default, Serialize, Deserialize)]
 pub(super) struct Snapshot {
     pub messages: Vec<Mail>,
+    #[serde(default)]
+    pub uid_validity: Option<u32>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct InboxCursor {
+    uid_validity: u32,
+    highest_uid: u32,
 }
 
 pub(super) struct Cache(PathBuf);
@@ -57,6 +65,45 @@ impl Cache {
         })
     }
 
+    pub fn new_inbox_messages(&self, snapshot: &Snapshot) -> io::Result<usize> {
+        let Some(uid_validity) = snapshot.uid_validity else {
+            return Ok(0);
+        };
+        let path = self.0.join("inbox-notification-cursor.json");
+        let previous = fs::File::open(&path)
+            .ok()
+            .and_then(|file| serde_json::from_reader::<_, InboxCursor>(BufReader::new(file)).ok())
+            .filter(|cursor| cursor.uid_validity == uid_validity);
+        let mut highest_uid = previous.as_ref().map_or(0, |cursor| cursor.highest_uid);
+        let mut count = 0;
+        for mail in &snapshot.messages {
+            highest_uid = highest_uid.max(mail.id.uid);
+            if mail.unread
+                && previous
+                    .as_ref()
+                    .is_some_and(|cursor| mail.id.uid > cursor.highest_uid)
+            {
+                count += 1;
+            }
+        }
+        if previous
+            .as_ref()
+            .is_none_or(|cursor| highest_uid != cursor.highest_uid)
+        {
+            atomic_write(&path, |writer| {
+                serde_json::to_writer(
+                    writer,
+                    &InboxCursor {
+                        uid_validity,
+                        highest_uid,
+                    },
+                )
+                .map_err(io::Error::other)
+            })?;
+        }
+        Ok(count)
+    }
+
     pub fn sync_lock(&self, folder: Folder) -> io::Result<fs::File> {
         private_dir(&self.0)?;
         let file = fs::OpenOptions::new()
@@ -98,4 +145,68 @@ fn atomic_write(
     drop(writer);
     file.persist(path)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn snapshot(uid_validity: u32, messages: &[(u32, bool)]) -> Snapshot {
+        Snapshot {
+            uid_validity: Some(uid_validity),
+            messages: messages
+                .iter()
+                .map(|&(uid, unread)| Mail {
+                    id: MailId {
+                        account: uuid::Uuid::nil(),
+                        folder: "INBOX".into(),
+                        uid_validity,
+                        uid,
+                    },
+                    account_email: String::new(),
+                    unread,
+                    flagged: false,
+                    sender: String::new(),
+                    address: String::new(),
+                    recipients: None,
+                    subject: String::new(),
+                    time: String::new(),
+                    timestamp: 0,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn inbox_cursor_tracks_new_unread_mail_across_empty_folders_and_resets() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache(dir.path().to_owned());
+        assert_eq!(
+            cache
+                .new_inbox_messages(&snapshot(1, &[(5, true)]))
+                .unwrap(),
+            0
+        );
+        assert_eq!(cache.new_inbox_messages(&snapshot(1, &[])).unwrap(), 0);
+        let recent = snapshot(1, &[(5, true), (6, true), (7, false)]);
+        assert_eq!(cache.new_inbox_messages(&recent).unwrap(), 1);
+        assert_eq!(
+            Cache(dir.path().to_owned())
+                .new_inbox_messages(&recent)
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            cache
+                .new_inbox_messages(&snapshot(2, &[(3, true)]))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            cache
+                .new_inbox_messages(&snapshot(2, &[(4, true)]))
+                .unwrap(),
+            1
+        );
+    }
 }

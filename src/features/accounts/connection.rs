@@ -17,14 +17,13 @@ pub(super) async fn check(account: Account, password: Password) -> Result<(), Er
     } else {
         password
     };
-    let check = tokio::task::spawn_blocking(move || {
+    let check = blocking_network(move || {
         check_imap(&account, &password)?;
         check_smtp(&account, password)
     });
     tokio::time::timeout(Duration::from_secs(45), check)
         .await
         .map_err(|_| Error::ConnectionTimeout)?
-        .map_err(|_| Error::ConnectionTask)?
 }
 
 pub(in crate::features) async fn with_imap<T, E>(
@@ -55,16 +54,38 @@ where
 {
     let connect = async {
         let password = store::stored_password(account.id).await?;
-        tokio::task::spawn_blocking(move || login_imap(&account, &password))
-            .await
-            .map_err(|_| Error::ConnectionTask)?
+        blocking_network(move || login_imap(&account, &password)).await
     };
     let mut session = tokio::time::timeout(Duration::from_secs(45), connect)
         .await
         .map_err(|_| Error::ConnectionTimeout)??;
-    tokio::task::spawn_blocking(move || operation(&mut session))
-        .await
-        .map_err(|_| Error::ConnectionTask)?
+    blocking_network(move || operation(&mut session)).await
+}
+
+// Tokio waits for its blocking pool on shutdown. A stuck mail server should
+// not hold the GUI open after Quit; these bounded workers own their sockets.
+async fn blocking_network<T, E>(
+    work: impl FnOnce() -> Result<T, E> + Send + 'static,
+) -> Result<T, E>
+where
+    T: Send + 'static,
+    E: From<Error> + Send + 'static,
+{
+    static SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(8);
+    let permit = SLOTS.acquire().await.map_err(|_| Error::ConnectionTask)?;
+    let (send, receive) = tokio::sync::oneshot::channel();
+    let runtime = tokio::runtime::Handle::current();
+    std::thread::Builder::new()
+        .name("mail-network".into())
+        .spawn(move || {
+            let _permit = permit;
+            let _runtime = runtime.enter();
+            if !send.is_closed() {
+                let _ = send.send(work());
+            }
+        })
+        .map_err(|_| Error::ConnectionTask)?;
+    receive.await.map_err(|_| Error::ConnectionTask)?
 }
 
 fn check_imap(account: &Account, password: &Password) -> Result<(), Error> {
@@ -122,5 +143,35 @@ fn check_smtp(account: &Account, password: Password) -> Result<(), Error> {
     match smtp_transport(account, password)?.test_connection() {
         Ok(true) => Ok(()),
         _ => Err(Error::SmtpConnect),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shutting_down_tokio_does_not_wait_for_network_io() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let (started, running) = std::sync::mpsc::channel();
+        let (unblock, blocked) = std::sync::mpsc::channel();
+        let (finished, stopped) = std::sync::mpsc::channel();
+        runtime.spawn(async move {
+            let _ = blocking_network(move || -> Result<(), Error> {
+                started.send(()).unwrap();
+                let _ = blocked.recv_timeout(Duration::from_secs(5));
+                finished.send(()).unwrap();
+                Ok(())
+            })
+            .await;
+        });
+        running.recv_timeout(Duration::from_secs(5)).unwrap();
+        drop(runtime);
+        assert!(matches!(
+            stopped.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        unblock.send(()).unwrap();
+        stopped.recv_timeout(Duration::from_secs(5)).unwrap();
     }
 }

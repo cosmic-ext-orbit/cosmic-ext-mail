@@ -90,7 +90,7 @@ impl FolderContents {
             }));
     }
 
-    fn sort(&mut self) {
+    pub(super) fn sort(&mut self) {
         self.messages.sort_by_key(|mail| {
             (
                 Reverse(mail.timestamp),
@@ -113,12 +113,13 @@ pub(super) async fn load(
     accounts: Vec<Account>,
     folder: Folder,
     downloads: mpsc::UnboundedSender<DownloadEvent>,
+    prefetch: bool,
 ) -> FolderContents {
     let mut results = stream::iter(accounts.into_iter().map(|account| {
         let downloads = downloads.clone();
         async move {
             let email = account.email.clone();
-            match sync(account.clone(), folder, downloads).await {
+            match sync(account.clone(), folder, downloads, prefetch).await {
                 Ok(snapshot) => (email, Some(snapshot), None),
                 Err(error) => {
                     let snapshot = tokio::task::spawn_blocking(move || {
@@ -146,10 +147,19 @@ pub(super) async fn load(
     contents
 }
 
+pub(crate) async fn poll_inbox(accounts: Vec<Account>) -> bool {
+    let (downloads, _progress) = mpsc::unbounded_channel();
+    load(accounts, Folder::Inbox, downloads, false)
+        .await
+        .failures
+        .is_empty()
+}
+
 async fn sync(
     account: Account,
     folder: Folder,
     downloads: mpsc::UnboundedSender<DownloadEvent>,
+    prefetch: bool,
 ) -> Result<Snapshot, Error> {
     let (send, receive) = oneshot::channel();
     let mut worker = tokio::spawn(async move {
@@ -157,6 +167,9 @@ async fn sync(
             .acquire()
             .await
             .expect("mail sync semaphore stays open");
+        if downloads.is_closed() {
+            return Ok(());
+        }
         accounts::with_imap_session(account.clone(), move |session| -> Result<(), Error> {
             let _permit = permit;
             let cache = Cache::for_account(&account);
@@ -165,28 +178,40 @@ async fn sync(
                 .and_then(|cache| cache.sync_lock(folder).ok());
             let cache = cache.filter(|_| lock.is_some());
             let previous = cache.as_ref().and_then(|cache| cache.snapshot(folder));
-            let (snapshot, sizes) = sync_headers(session, &account, folder, previous)?;
+            let (snapshot, sizes) = sync_headers(session, &account, folder, previous, &downloads)?;
+            if downloads.is_closed() {
+                return Ok(());
+            }
             if let Some(cache) = &cache {
                 let _ = cache.save_snapshot(folder, &snapshot);
+                if folder == Folder::Inbox
+                    && let Ok(count) = cache.new_inbox_messages(&snapshot)
+                    && count > 0
+                {
+                    tokio::spawn(super::notifications::new_mail(account.id, count));
+                }
             }
             drop(lock);
-            let pending = cache.as_ref().map(|cache| {
-                snapshot
-                    .messages
-                    .iter()
-                    .rev()
-                    .filter_map(|mail| {
-                        let size = sizes
-                            .get(&mail.id.uid)
-                            .copied()
-                            .flatten()
-                            .map(|size| size as usize);
-                        let path = cache.body_path(&mail.id);
-                        (!path.is_file() && size.is_none_or(|size| size <= MAX_BODY_BYTES))
-                            .then_some((mail.id.uid, size, path))
-                    })
-                    .collect::<Vec<_>>()
-            });
+            let pending = cache
+                .as_ref()
+                .filter(|_| prefetch && !downloads.is_closed())
+                .map(|cache| {
+                    snapshot
+                        .messages
+                        .iter()
+                        .rev()
+                        .filter_map(|mail| {
+                            let size = sizes
+                                .get(&mail.id.uid)
+                                .copied()
+                                .flatten()
+                                .map(|size| size as usize);
+                            let path = cache.body_path(&mail.id);
+                            (!path.is_file() && size.is_none_or(|size| size <= MAX_BODY_BYTES))
+                                .then_some((mail.id.uid, size, path))
+                        })
+                        .collect::<Vec<_>>()
+                });
             // Deliver the folder while this connection fills in missing bodies.
             let _ = send.send(snapshot);
             if let Some(pending) = pending.filter(|pending| !pending.is_empty()) {
@@ -214,6 +239,7 @@ fn sync_headers(
     account: &Account,
     folder: Folder,
     previous: Option<Snapshot>,
+    downloads: &mpsc::UnboundedSender<DownloadEvent>,
 ) -> Result<(Snapshot, HashMap<u32, Option<u32>>), Error> {
     let path = if folder == Folder::Inbox {
         "INBOX".to_owned()
@@ -227,10 +253,16 @@ fn sync_headers(
         name.to_owned()
     };
     let mailbox = session.examine(&path).map_err(|_| Error::Folder)?;
-    if mailbox.exists == 0 {
-        return Ok(Default::default());
-    }
     let uid_validity = mailbox.uid_validity.ok_or(Error::Fetch)?;
+    if mailbox.exists == 0 {
+        return Ok((
+            Snapshot {
+                uid_validity: Some(uid_validity),
+                ..Snapshot::default()
+            },
+            HashMap::new(),
+        ));
+    }
     let mut uids: Vec<_> = session
         .uid_search("ALL")
         .map_err(|_| Error::Fetch)?
@@ -239,6 +271,9 @@ fn sync_headers(
     uids.sort_unstable();
     let mut current = HashMap::with_capacity(uids.len());
     for batch in uids.chunks(METADATA_BATCH_SIZE) {
+        if downloads.is_closed() {
+            return Err(Error::Fetch);
+        }
         let flags = session
             .uid_fetch(uid_set(batch.iter().copied()), "(UID FLAGS RFC822.SIZE)")
             .map_err(|_| Error::Fetch)?;
@@ -270,6 +305,9 @@ fn sync_headers(
         })
         .collect();
     for batch in missing.chunks(HEADER_BATCH_SIZE) {
+        if downloads.is_closed() {
+            return Err(Error::Fetch);
+        }
         let fetched = session
             .uid_fetch(
                 uid_set(batch.iter().copied()),
@@ -340,7 +378,13 @@ fn sync_headers(
             Some(mail)
         })
         .collect();
-    Ok((Snapshot { messages }, sizes))
+    Ok((
+        Snapshot {
+            messages,
+            uid_validity: Some(uid_validity),
+        },
+        sizes,
+    ))
 }
 
 fn uid_set(uids: impl Iterator<Item = u32>) -> String {
@@ -362,6 +406,9 @@ fn prefetch_bodies(
         .map(|batch| (batch, SMALL_BODY_BYTES))
         .chain(large.chunks(1).map(|batch| (batch, MAX_BODY_BYTES)));
     for (batch, limit) in batches {
+        if downloads.is_closed() {
+            break;
+        }
         let missing: Vec<_> = batch
             .iter()
             .filter(|(_, _, path)| !path.is_file())
@@ -442,8 +489,33 @@ pub enum Change {
     Flagged(bool),
 }
 
-pub async fn change(account: Account, id: MailId, change: Change) -> Result<(), Error> {
+impl Change {
+    pub(super) fn apply(self, messages: &mut Vec<Mail>, id: &MailId) {
+        let Some(index) = messages.iter().position(|mail| mail.id == *id) else {
+            return;
+        };
+        match self {
+            Self::Move(_) => {
+                messages.remove(index);
+            }
+            Self::Seen(seen) => messages[index].unread = !seen,
+            Self::Flagged(flagged) => messages[index].flagged = flagged,
+        }
+    }
+}
+
+pub async fn change(
+    account: Account,
+    folder: Folder,
+    id: MailId,
+    change: Change,
+) -> Result<(), Error> {
+    let cache = Cache::for_account(&account);
     accounts::with_imap_session(account, move |session| {
+        let cache = cache.as_ref().and_then(|cache| {
+            let lock = cache.sync_lock(folder).ok()?;
+            Some((cache, lock))
+        });
         let mailbox = session.select(&id.folder).map_err(|_| Error::Folder)?;
         if mailbox.uid_validity != Some(id.uid_validity) {
             return Err(Error::MessageUnavailable);
@@ -481,6 +553,12 @@ pub async fn change(account: Account, id: MailId, change: Change) -> Result<(), 
                     .uid_store(uid, command)
                     .map_err(|_| Error::ChangeFailed)?;
             }
+        }
+        if let Some((cache, _lock)) = cache
+            && let Some(mut snapshot) = cache.snapshot(folder)
+        {
+            change.apply(&mut snapshot.messages, &id);
+            let _ = cache.save_snapshot(folder, &snapshot);
         }
         Ok(())
     })

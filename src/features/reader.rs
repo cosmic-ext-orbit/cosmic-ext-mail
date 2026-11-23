@@ -29,7 +29,6 @@ pub enum Message {
     CopyAddress(String),
     ComposeTo(String),
     Change(remote::Change),
-    Changed(Folder, u64, Result<(), remote::Error>),
 }
 
 pub struct Reader {
@@ -40,8 +39,6 @@ pub struct Reader {
     forward_text: String,
     reply_address: Option<String>,
     message_id: Option<String>,
-    changing: bool,
-    action_error: Option<String>,
     open: bool,
 }
 
@@ -62,10 +59,14 @@ impl Reader {
             forward_text: String::new(),
             reply_address: None,
             message_id: None,
-            changing: false,
-            action_error: None,
             open: false,
         }
+    }
+
+    pub fn release_window(&mut self) {
+        self.request += 1;
+        self.email = None;
+        self.body = Body::Empty;
     }
 
     pub fn load(
@@ -79,7 +80,6 @@ impl Reader {
         self.forward_text.clear();
         self.reply_address = None;
         self.message_id = None;
-        self.action_error = None;
         let Some(mail) = mail else {
             return Task::none();
         };
@@ -161,24 +161,8 @@ impl Reader {
         &self.forward_text
     }
 
-    pub fn set_action_error(&mut self, error: String) {
-        self.action_error = Some(error);
-    }
-
-    pub fn begin_change(&mut self) -> Option<u64> {
-        if self.changing {
-            return None;
-        }
-        self.changing = true;
-        self.action_error = None;
-        Some(self.request)
-    }
-
-    pub fn finish_change(&mut self, request: u64, result: Result<(), remote::Error>) {
-        self.changing = false;
-        if self.request == request {
-            self.action_error = result.err().map(remote::Error::text);
-        }
+    pub fn is_loading(&self) -> bool {
+        matches!(self.body, Body::Loading)
     }
 
     pub fn is_open(&self) -> bool {
@@ -200,6 +184,7 @@ impl Reader {
         mail: Option<&'a Mail>,
         folder: Folder,
         narrow: bool,
+        changing: bool,
         config: &'a Config,
         photos: Option<&'a crate::features::avatars::Avatars>,
     ) -> Element<'a, Message> {
@@ -228,6 +213,7 @@ impl Reader {
                 self.header(
                     mail,
                     folder,
+                    changing,
                     config,
                     photos.and_then(|photos| photos.get(&mail.address)),
                     size.width,
@@ -244,6 +230,7 @@ impl Reader {
         &'a self,
         mail: &'a Mail,
         folder: Folder,
+        changing: bool,
         config: &Config,
         photo: Option<&cosmic::iced::widget::image::Handle>,
         width: f32,
@@ -274,7 +261,7 @@ impl Reader {
             sender.into()
         };
 
-        let change = |action| (!self.changing).then_some(Message::Change(action));
+        let change = |action| (!changing).then_some(Message::Change(action));
         let move_to = |destination| {
             (folder != destination)
                 .then(|| change(remote::Change::Move(destination)))
@@ -311,7 +298,7 @@ impl Reader {
                 fl!("delete-message"),
                 move_to(Folder::Trash),
             ),
-            self.more_menu(mail, style),
+            self.more_menu(mail, style, changing),
             action_button(
                 style,
                 if mail.flagged {
@@ -377,14 +364,14 @@ impl Reader {
         if let Some(actions) = trailing_actions {
             header = header.push(actions);
         }
-        if self.changing {
-            header = header.push(widget::text::caption(fl!("mail-change-working")));
-        } else if let Some(error) = &self.action_error {
-            header = header.push(widget::text::caption(error.as_str()));
-        }
         header.into()
     }
-    fn more_menu(&self, mail: &Mail, style: MessageActions) -> Element<'static, Message> {
+    fn more_menu(
+        &self,
+        mail: &Mail,
+        style: MessageActions,
+        changing: bool,
+    ) -> Element<'static, Message> {
         let label = if mail.unread {
             fl!("mark-message-read")
         } else {
@@ -392,7 +379,7 @@ impl Reader {
         };
         let mut items = vec![(
             label,
-            (!self.changing).then_some(Message::Change(remote::Change::Seen(mail.unread))),
+            (!changing).then_some(Message::Change(remote::Change::Seen(mail.unread))),
         )];
         if matches!(self.body, Body::Ready)
             && self
