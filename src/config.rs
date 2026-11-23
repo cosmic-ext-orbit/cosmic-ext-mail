@@ -9,6 +9,7 @@ use cosmic::cosmic_config::{self, CosmicConfigEntry, cosmic_config_derive::Cosmi
 #[version = 1]
 pub struct Config {
     pub load_remote_images: bool,
+    pub hide_footer: bool,
     // Retain the persisted key so existing picture preferences carry over.
     pub show_recipient_pictures: bool,
     pub fetch_sender_photos: bool,

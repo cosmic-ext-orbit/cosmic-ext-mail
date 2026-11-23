@@ -14,7 +14,8 @@ shortcut-toggle-star = Star or unstar
 repository = Repository
 app-menu = Menu
 settings = Settings
-mail-display = Message display
+mail-display = Display
+mail-hide-footer = Hide status footer
 settings-error = Could not load or save app settings.
 welcome = Welcome to COSMIC! ✨
 page-id = Page { $num }
@@ -186,3 +187,7 @@ smtp-rejected = The server rejected the message. Check the account and recipient
 smtp-uncertain = Delivery could not be confirmed. Check your sent messages or with the recipient before retrying. A retry could send a duplicate.
 smtp-retry = Retry anyway
 reply-attribution = { $sender } wrote:
+
+mail-delete-permanently = Delete permanently
+mail-delete-permanently-confirm = Permanently delete this message from Trash? This cannot be undone.
+mail-permanent-delete-unsupported = This mail server does not support permanently deleting a single message from Trash.

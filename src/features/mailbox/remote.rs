@@ -31,6 +31,7 @@ pub enum Error {
     MessageTooLarge,
     DestinationUnavailable,
     ChangeFailed,
+    PermanentDeleteUnsupported,
 }
 
 impl From<accounts::Error> for Error {
@@ -49,6 +50,7 @@ impl Error {
             Self::MessageTooLarge => fl!("mail-too-large"),
             Self::DestinationUnavailable => fl!("mail-destination-unavailable"),
             Self::ChangeFailed => fl!("mail-change-failed"),
+            Self::PermanentDeleteUnsupported => fl!("mail-permanent-delete-unsupported"),
         }
     }
 }
@@ -485,14 +487,19 @@ fn folder_name<'a>(
 #[derive(Clone, Copy, Debug)]
 pub enum Change {
     Move(Folder),
+    DeletePermanently,
     Seen(bool),
     Flagged(bool),
 }
 
 impl Change {
+    pub fn removes_message(self) -> bool {
+        matches!(self, Self::Move(_) | Self::DeletePermanently)
+    }
+
     pub(super) fn affects(self, mail: &Mail) -> bool {
         match self {
-            Self::Move(_) => true,
+            Self::Move(_) | Self::DeletePermanently => true,
             Self::Seen(seen) => mail.unread == seen,
             Self::Flagged(flagged) => mail.flagged != flagged,
         }
@@ -503,7 +510,7 @@ impl Change {
             return;
         };
         match self {
-            Self::Move(_) => {
+            Self::Move(_) | Self::DeletePermanently => {
                 messages.remove(index);
             }
             Self::Seen(seen) => messages[index].unread = !seen,
@@ -540,6 +547,44 @@ pub async fn change(
                 session
                     .uid_mv(uid, destination)
                     .map_err(|_| Error::ChangeFailed)?;
+            }
+            Change::DeletePermanently => {
+                if folder != Folder::Trash {
+                    return Err(Error::MessageUnavailable);
+                }
+                let names = session
+                    .list(Some(""), Some("*"))
+                    .map_err(|_| Error::Folder)?;
+                if folder_name(names.iter(), Folder::Trash) != Some(id.folder.as_str()) {
+                    return Err(Error::MessageUnavailable);
+                }
+                let capabilities = session.capabilities().map_err(|_| Error::ChangeFailed)?;
+                if !["UIDPLUS", "IMAP4rev2", "IMAP4REV2"]
+                    .into_iter()
+                    .any(|name| capabilities.has_str(name))
+                {
+                    return Err(Error::PermanentDeleteUnsupported);
+                }
+                let flags = session
+                    .uid_fetch(&uid, "(UID FLAGS)")
+                    .map_err(|_| Error::ChangeFailed)?;
+                if let Some(message) = flags.iter().find(|message| message.uid == Some(id.uid)) {
+                    let already_deleted = message.flags().contains(&imap::types::Flag::Deleted);
+                    if !already_deleted {
+                        session
+                            .uid_store(&uid, "+FLAGS.SILENT (\\Deleted)")
+                            .map_err(|_| Error::ChangeFailed)?;
+                    }
+                    if session.uid_expunge(&uid).is_err() {
+                        if !already_deleted {
+                            let _ = session.uid_store(&uid, "-FLAGS.SILENT (\\Deleted)");
+                        }
+                        return Err(Error::ChangeFailed);
+                    }
+                }
+                if let Some((cache, _)) = &cache {
+                    let _ = std::fs::remove_file(cache.body_path(&id));
+                }
             }
             Change::Seen(seen) => {
                 let command = if seen {

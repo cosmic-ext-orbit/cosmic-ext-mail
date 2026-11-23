@@ -65,6 +65,7 @@ pub enum Message {
         Result<(), mailbox::remote::Error>,
     ),
     CloseToast(widget::ToastId),
+    ResolvePermanentDelete(bool),
     MenuSurface(cosmic::surface::Action<Message>),
     RowComposeLoaded {
         request: uuid::Uuid,
@@ -86,6 +87,7 @@ pub enum Message {
     LaunchUrl(String),
     SetLoadRemoteImages(bool),
     SetShowSenderPictures(bool),
+    SetHideFooter(bool),
     SetFetchSenderPhotos(bool),
     SenderPhoto(String, Option<cosmic::iced::widget::image::Handle>),
     SetMessageActions(usize),
@@ -105,6 +107,7 @@ pub struct AppModel {
     reader: Reader,
     toasts: widget::Toasts<Message>,
     row_compose_request: Option<uuid::Uuid>,
+    permanent_delete: Option<mailbox::MailId>,
     search: Search,
     composer: Composer,
     panes: pane_grid::State<Pane>,
@@ -185,6 +188,7 @@ impl cosmic::Application for AppModel {
             reader: Reader::new(),
             toasts: widget::Toasts::new(Message::CloseToast),
             row_compose_request: None,
+            permanent_delete: None,
             search: Search::new(),
             composer: Composer::default(),
             panes,
@@ -384,6 +388,14 @@ impl cosmic::Application for AppModel {
                 };
                 return task.map(|message| Message::Composer(message).into());
             }
+            Message::ResolvePermanentDelete(confirmed) => {
+                if let Some(id) = self.permanent_delete.take()
+                    && confirmed
+                    && self.mailbox.folder() == mailbox::Folder::Trash
+                {
+                    return self.change_mail(id, mailbox::remote::Change::DeletePermanently);
+                }
+            }
             Message::CloseToast(id) => self.toasts.remove(id),
             Message::MenuSurface(action) => return cosmic::surface::surface_task(action),
             Message::MailChanged(source, id, change, result) => {
@@ -450,6 +462,7 @@ impl cosmic::Application for AppModel {
                 if self.core.main_window_is(id) {
                     self.core.set_main_window_id(None);
                     self.reader.release_window();
+                    self.permanent_delete = None;
                     self.row_compose_request = None;
                     self.mailbox.cancel_sync();
                     return self.check_inbox();
@@ -488,6 +501,7 @@ impl cosmic::Application for AppModel {
             }
             Message::SetLoadRemoteImages(_)
             | Message::SetShowSenderPictures(_)
+            | Message::SetHideFooter(_)
             | Message::SetFetchSenderPhotos(_)
             | Message::SetMessageActions(_) => {
                 let Some(handler) = &self.config_handler else {
@@ -498,6 +512,7 @@ impl cosmic::Application for AppModel {
                     Message::SetLoadRemoteImages(enabled) => {
                         config.set_load_remote_images(handler, enabled)
                     }
+                    Message::SetHideFooter(hidden) => config.set_hide_footer(handler, hidden),
                     Message::SetShowSenderPictures(enabled) => {
                         config.set_show_recipient_pictures(handler, enabled)
                     }
@@ -552,7 +567,7 @@ impl cosmic::Application for AppModel {
                     )
                     .map(Message::Reader),
             )
-            .padding([mailbox::CONTENT_GUTTER, 0])
+            .padding([0, 0, mailbox::CONTENT_GUTTER, 0])
             .width(Length::Fill)
             .height(Length::Fill)
             .into()
@@ -582,6 +597,10 @@ impl cosmic::Application for AppModel {
     }
 
     fn footer(&self) -> Option<Element<'_, Message>> {
+        if self.config.hide_footer {
+            return None;
+        }
+
         use mailbox::{Activity, FetchActivity};
 
         let activity = self.mailbox.activity();
@@ -669,6 +688,9 @@ impl cosmic::Application for AppModel {
     }
 
     fn on_escape(&mut self) -> Task<Message> {
+        if self.permanent_delete.take().is_some() {
+            return Task::none();
+        }
         if self.accounts.is_adding() {
             return self.update(Message::Accounts(accounts::Message::Back));
         }
@@ -683,6 +705,22 @@ impl cosmic::Application for AppModel {
     }
 
     fn dialog(&self) -> Option<Element<'_, Message>> {
+        if self.permanent_delete.is_some() {
+            return Some(
+                widget::dialog()
+                    .title(fl!("mail-delete-permanently"))
+                    .control(widget::text::body(fl!("mail-delete-permanently-confirm")))
+                    .secondary_action(
+                        widget::button::standard(fl!("compose-cancel"))
+                            .on_press(Message::ResolvePermanentDelete(false)),
+                    )
+                    .primary_action(
+                        widget::button::destructive(fl!("mail-delete-permanently"))
+                            .on_press(Message::ResolvePermanentDelete(true)),
+                    )
+                    .into(),
+            );
+        }
         if let Some(dialog) = self.accounts.add_dialog() {
             return Some(dialog.map(Message::Accounts));
         }
@@ -708,6 +746,12 @@ impl AppModel {
                         .as_ref()
                         .map(|_| Message::SetLoadRemoteImages),
                 ),
+            ),
+        );
+        preferences = preferences.add(
+            widget::settings::item::builder(fl!("mail-hide-footer")).control(
+                widget::toggler(self.config.hide_footer)
+                    .on_toggle_maybe(self.config_handler.as_ref().map(|_| Message::SetHideFooter)),
             ),
         );
         let selected = MessageActions::ALL
@@ -764,6 +808,9 @@ impl AppModel {
         use mailbox::{ComposeAction, RowAction};
         use shortcuts::Action;
 
+        if self.permanent_delete.is_some() {
+            return Task::none();
+        }
         let message = match action {
             Action::Menu(action) => menu::Action::message(&action),
             Action::NewMessage => Message::Composer(composer::Message::Open),
@@ -799,6 +846,11 @@ impl AppModel {
                     }
                     Action::ToggleStar => {
                         RowAction::Change(mailbox::remote::Change::Flagged(!mail.flagged))
+                    }
+                    Action::Move(mailbox::Folder::Trash)
+                        if self.mailbox.folder() == mailbox::Folder::Trash =>
+                    {
+                        RowAction::ConfirmPermanentDelete
                     }
                     Action::Move(folder) if self.mailbox.folder() != folder => {
                         RowAction::Change(mailbox::remote::Change::Move(folder))
@@ -942,6 +994,12 @@ impl AppModel {
                 Task::batch([task, self.open_selected()])
             }
             RowAction::Change(change) => self.change_mail(id, change),
+            RowAction::ConfirmPermanentDelete => {
+                if self.mailbox.folder() == mailbox::Folder::Trash {
+                    self.permanent_delete = Some(id);
+                }
+                Task::none()
+            }
             RowAction::CopySender => cosmic::iced::clipboard::write(mail.address.clone()),
             RowAction::ComposeToSender => {
                 self.row_compose_request = None;
@@ -1040,6 +1098,12 @@ impl AppModel {
                     .composer
                     .compose_to(address, account)
                     .map(|message| Message::Composer(message).into());
+            }
+            reader::Message::ConfirmPermanentDelete => {
+                if let Some(mail) = self.mailbox.selected() {
+                    return self
+                        .update_row(mail.id.clone(), mailbox::RowAction::ConfirmPermanentDelete);
+                }
             }
             reader::Message::Change(change) => return self.change_selected(change),
         }
@@ -1155,8 +1219,8 @@ impl AppModel {
         id: mailbox::MailId,
         change: mailbox::remote::Change,
     ) -> Task<Message> {
-        let closes_reader = matches!(change, mailbox::remote::Change::Move(_))
-            && self.mailbox.selected().is_some_and(|mail| mail.id == id);
+        let closes_reader =
+            change.removes_message() && self.mailbox.selected().is_some_and(|mail| mail.id == id);
         let source = self.mailbox.folder();
         let request = match self.mailbox.begin_change(&id, change) {
             mailbox::ChangeStart::Send => self.send_mail_change(source, id, change),

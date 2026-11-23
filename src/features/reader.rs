@@ -24,6 +24,7 @@ pub enum Message {
     BackToList,
     Retry,
     ShowRemoteImages,
+    ConfirmPermanentDelete,
     SaveAttachment(u64, usize),
     AttachmentSaved(Result<(), ()>),
     SetTheme(MailId, Option<bool>),
@@ -433,16 +434,24 @@ impl Reader {
             action_button(
                 style,
                 "user-trash-symbolic",
-                fl!("delete-message"),
-                move_to(Folder::Trash),
+                if folder == Folder::Trash {
+                    fl!("mail-delete-permanently")
+                } else {
+                    fl!("delete-message")
+                },
+                if folder == Folder::Trash {
+                    Some(Message::ConfirmPermanentDelete)
+                } else {
+                    move_to(Folder::Trash)
+                },
             ),
             self.more_menu(mail, style),
             action_button(
                 style,
                 if mail.flagged {
-                    "mail-mark-important-symbolic"
+                    "starred-symbolic"
                 } else {
-                    "insert-star-symbolic"
+                    "non-starred-symbolic"
                 },
                 if mail.flagged {
                     fl!("unstar-message")
@@ -621,8 +630,8 @@ fn address_menu(
     };
     let root = Element::from(
         widget::button::custom(label)
-            .class(cosmic::theme::Button::MenuRoot)
-            .padding(if recipient { [0, 0] } else { [2, 4] })
+            .class(cosmic::theme::Button::Text)
+            .padding([3, 6])
             .force_enabled(true),
     );
     dropdown_menu(

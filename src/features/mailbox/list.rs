@@ -35,6 +35,7 @@ pub enum RowAction {
     Open,
     Compose(ComposeAction),
     CopySender,
+    ConfirmPermanentDelete,
     ComposeToSender,
     Change(remote::Change),
 }
@@ -102,16 +103,15 @@ impl Mailbox {
                     } else {
                         mail.sender.to_owned()
                     };
-                    let line = widget::row::with_capacity(3)
-                        .push(widget::text::body(sender).width(Length::Fill))
-                        .push_maybe(mail.flagged.then(|| {
-                            widget::icon::from_name("mail-mark-important-symbolic")
-                                .size(16)
-                                .icon()
-                        }))
-                        .push(widget::text::caption(mail.display_time()))
-                        .align_y(cosmic::iced::Alignment::Center)
-                        .spacing(4);
+                    let line =
+                        widget::row::with_capacity(3)
+                            .push(widget::text::body(sender).width(Length::Fill))
+                            .push_maybe(mail.flagged.then(|| {
+                                widget::icon::from_name("starred-symbolic").size(16).icon()
+                            }))
+                            .push(widget::text::caption(mail.display_time()))
+                            .align_y(cosmic::iced::Alignment::Center)
+                            .spacing(4);
                     let subject = if mail.unread {
                         widget::text::body(mail.subject.as_str()).font(cosmic::font::bold())
                     } else {
@@ -215,7 +215,7 @@ impl Mailbox {
             .height(Length::Fill);
 
         widget::container(card)
-            .padding(CONTENT_GUTTER)
+            .padding([0, CONTENT_GUTTER, CONTENT_GUTTER, CONTENT_GUTTER])
             .width(Length::Fill)
             .height(Length::Fill)
             .into()
@@ -282,6 +282,13 @@ impl Mailbox {
             if folder != self.folder {
                 items.push(item(label, Change(remote::Change::Move(folder))));
             }
+        }
+
+        if self.folder == Folder::Trash {
+            items.push(item(
+                fl!("mail-delete-permanently"),
+                RowAction::ConfirmPermanentDelete,
+            ));
         }
 
         widget::context_menu(button, Some(items))

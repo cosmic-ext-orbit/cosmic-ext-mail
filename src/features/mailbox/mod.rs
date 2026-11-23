@@ -377,7 +377,7 @@ impl Mailbox {
             .iter_mut()
             .find(|pending| pending.original.id == *id);
         let was_selected = self.selected == Some(index);
-        let moving = matches!(change, remote::Change::Move(_));
+        let moving = change.removes_message();
         let start = if let Some(pending) = previous {
             pending
                 .queued
@@ -422,12 +422,12 @@ impl Mailbox {
             return ChangeCompletion::default();
         };
         let mut pending = self.pending_changes.remove(index);
-        let move_failed = matches!(pending.change, Change::Move(_)) && !succeeded;
+        let move_failed = pending.change.removes_message() && !succeeded;
         if succeeded {
             match pending.change {
                 Change::Seen(seen) => pending.original.unread = !seen,
                 Change::Flagged(flagged) => pending.original.flagged = flagged,
-                Change::Move(_) => return ChangeCompletion::default(),
+                Change::Move(_) | Change::DeletePermanently => return ChangeCompletion::default(),
             }
         }
 
@@ -491,11 +491,8 @@ impl Mailbox {
             && self.pending_changes.iter().any(|pending| {
                 pending.folder == self.folder
                     && pending.was_selected
-                    && (matches!(pending.change, remote::Change::Move(_))
-                        || pending
-                            .queued
-                            .iter()
-                            .any(|change| matches!(change, remote::Change::Move(_))))
+                    && (pending.change.removes_message()
+                        || pending.queued.iter().any(|change| change.removes_message()))
             })
         {
             return None;
@@ -682,6 +679,31 @@ mod tests {
             time: String::new(),
             timestamp: 4 - i64::from(uid),
         }
+    }
+
+    #[test]
+    fn permanent_delete_removes_only_the_target_and_rolls_back_on_failure() {
+        let mut mailbox = Mailbox::new();
+        mailbox.folder = Folder::Trash;
+        let target = mail(1, "Delete this");
+        let other = mail(2, "Keep this");
+        mailbox.contents.messages = vec![target.clone(), other.clone()];
+        assert!(mailbox.set_selection(Some(0)));
+
+        let change = remote::Change::DeletePermanently;
+        assert_eq!(mailbox.begin_change(&target.id, change), ChangeStart::Send);
+        assert_eq!(mailbox.contents.messages.len(), 1);
+        assert_eq!(mailbox.contents.messages[0].id, other.id);
+        assert!(mailbox.finish_change(&target.id, false).restored_selection);
+        assert_eq!(
+            mailbox.selected().map(|message| &message.id),
+            Some(&target.id)
+        );
+
+        assert_eq!(mailbox.begin_change(&target.id, change), ChangeStart::Send);
+        mailbox.finish_change(&target.id, true);
+        assert_eq!(mailbox.contents.messages.len(), 1);
+        assert_eq!(mailbox.contents.messages[0].id, other.id);
     }
 
     #[test]
