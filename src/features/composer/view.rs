@@ -3,8 +3,8 @@
 use super::{Composer, Delivery, Message, Session};
 use crate::{features::accounts::Account, fl};
 use cosmic::{
-    Element,
-    iced::{Alignment, Length},
+    Element, Theme,
+    iced::{Alignment, Border, Length, widget::text_editor},
     widget,
 };
 use uuid::Uuid;
@@ -97,7 +97,10 @@ impl Composer {
                 .editing(editable)
                 .on_input(Message::SubjectChanged),
         );
-        let mut editor = widget::TextEditor::new(&session.body).height(Length::Fill);
+        let mut editor = widget::TextEditor::new(&session.body)
+            .height(Length::Fill)
+            .padding(cosmic::theme::spacing().space_xxs)
+            .style(compose_editor_style);
         if editable {
             editor = editor.on_action(Message::BodyChanged);
         }
@@ -219,6 +222,31 @@ impl Composer {
                 .primary_action(primary)
                 .into(),
         )
+    }
+}
+
+fn compose_editor_style(theme: &Theme, status: text_editor::Status) -> text_editor::Style {
+    use cosmic::{theme::TextInput, widget::text_input::StyleSheet};
+
+    let appearance = match status {
+        text_editor::Status::Active => theme.active(&TextInput::Default),
+        text_editor::Status::Hovered => theme.hovered(&TextInput::Default),
+        text_editor::Status::Focused { .. } => theme.focused(&TextInput::Default),
+        text_editor::Status::Disabled => theme.disabled(&TextInput::Default),
+    };
+
+    text_editor::Style {
+        background: appearance.background,
+        border: Border {
+            color: appearance.border_color,
+            width: appearance.border_width,
+            radius: appearance.border_radius,
+        },
+        value: appearance
+            .text_color
+            .unwrap_or_else(|| theme.current_container().on.into()),
+        placeholder: appearance.placeholder_color,
+        selection: appearance.selected_fill,
     }
 }
 
