@@ -541,15 +541,21 @@ impl cosmic::Application for AppModel {
                 .map(Message::List)
         };
         let reader = || {
-            self.reader
-                .view(
-                    self.mailbox.selected(),
-                    self.mailbox.folder(),
-                    self.narrow,
-                    &self.config,
-                    self.sender_photos(),
-                )
-                .map(Message::Reader)
+            widget::container(
+                self.reader
+                    .view(
+                        self.mailbox.selected(),
+                        self.mailbox.folder(),
+                        self.narrow,
+                        &self.config,
+                        self.sender_photos(),
+                    )
+                    .map(Message::Reader),
+            )
+            .padding([mailbox::CONTENT_GUTTER, 0])
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
         };
         let content: Element<_> = if self.narrow {
             if self.reader.is_open() {

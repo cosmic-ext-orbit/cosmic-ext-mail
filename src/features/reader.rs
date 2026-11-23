@@ -231,39 +231,47 @@ impl Reader {
         let Some(mail) = mail else {
             return page.push(widget::text::body(fl!("select-message"))).into();
         };
-        let page = page
-            .push(
-                widget::responsive(move |size| {
-                    self.header(
-                        mail,
-                        folder,
-                        config,
-                        photos.and_then(|photos| photos.get(&mail.address)),
-                        size.width,
-                    )
-                })
-                .height(Length::Shrink),
-            )
-            .push(widget::divider::horizontal::default());
-        match &self.body {
-            Body::Ready => widget::column::with_capacity(2)
-                .push(page)
-                .push(
-                    self.email
-                        .as_ref()
-                        .expect("ready email view")
-                        .view_themed(self.theme_overrides.get(&mail.id).copied()),
+        let header = page.push(
+            widget::responsive(move |size| {
+                self.header(
+                    mail,
+                    folder,
+                    config,
+                    photos.and_then(|photos| photos.get(&mail.address)),
+                    size.width,
                 )
-                .height(Length::Fill)
-                .into(),
-            Body::Failed(error) => page
+            })
+            .height(Length::Shrink),
+        );
+        let body: Element<_> = match &self.body {
+            Body::Ready => self
+                .email
+                .as_ref()
+                .expect("ready email view")
+                .view_themed(self.theme_overrides.get(&mail.id).copied()),
+            Body::Failed(error) => widget::column::with_capacity(2)
+                .padding(12)
+                .spacing(8)
                 .push(widget::text(fl!("preview-failed", error = error.as_str())))
                 .push(widget::button::text(fl!("mail-retry")).on_press(Message::Retry))
                 .into(),
-            Body::Empty | Body::Loading => page
-                .push(widget::text::body(fl!("mail-body-loading")))
-                .into(),
-        }
+            Body::Empty | Body::Loading => {
+                widget::container(widget::text::body(fl!("mail-body-loading")))
+                    .padding(12)
+                    .into()
+            }
+        };
+        widget::container(
+            widget::column::with_capacity(2)
+                .push(header)
+                .push(body)
+                .spacing(crate::features::mailbox::CONTENT_GUTTER)
+                .height(Length::Fill),
+        )
+        .class(cosmic::theme::Container::Card)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
     }
 
     fn header<'a>(

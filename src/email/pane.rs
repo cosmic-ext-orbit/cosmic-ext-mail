@@ -54,7 +54,17 @@ impl<Message> Widget<Message, Theme, Renderer> for Pane<'_> {
         if let Some(frame) = self.preview.frame.borrow().as_ref()
             && let Some(clip) = bounds.intersection(viewport)
         {
-            renderer.draw_image(image::Image::new(frame.handle().clone()), bounds, clip);
+            let mut image = image::Image::new(frame.handle().clone());
+            if matches!(self.appearance, Appearance::Themed(_)) {
+                let [_, _, bottom_right, bottom_left] = theme.cosmic().corner_radii.radius_s;
+                // The WGPU image shader uses the opposite corner order from Iced's Radius.
+                image.border_radius = match renderer {
+                    Renderer::Primary(_) => [bottom_right, bottom_left, 0.0, 0.0],
+                    Renderer::Secondary(_) => [0.0, 0.0, bottom_right, bottom_left],
+                }
+                .into();
+            }
+            renderer.draw_image(image, bounds, clip);
         }
     }
 
