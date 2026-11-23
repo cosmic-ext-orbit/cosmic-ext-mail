@@ -5,6 +5,9 @@
     <p>A mail client for the COSMIC desktop</p>
 </div>
 
+![color-schemes-light.png](https://github.com/user-attachments/assets/1db1920a-7ca1-4578-a048-2cada8baf749#gh-light-mode-only)
+![color-schemes-dark.png](https://github.com/user-attachments/assets/f944581e-dcd5-4322-833e-20656a0e2709#gh-dark-mode-only)
+
 ## Installation
 
 A [justfile](./justfile) is included by default for the [casey/just][just] command runner.
