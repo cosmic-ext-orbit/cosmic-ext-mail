@@ -993,6 +993,16 @@ impl AppModel {
             }
             reader::Message::ShowRemoteImages => self.reader.set_remote_images(true),
             reader::Message::SetTheme(id, dark) => self.reader.set_theme(id, dark),
+            reader::Message::SaveAttachment(request, index) => {
+                return self
+                    .reader
+                    .save_attachment(request, index)
+                    .map(|message| Message::Reader(message).into());
+            }
+            reader::Message::AttachmentSaved(Err(())) => {
+                return self.mail_action_error(fl!("mail-save-attachment-failed"));
+            }
+            reader::Message::AttachmentSaved(Ok(())) => {}
             reader::Message::Retry => return self.load_body(),
             reader::Message::Loaded(request, result) => {
                 self.reader

@@ -9,6 +9,7 @@ use cosmic::widget::menu;
 use cosmic::{Element, widget};
 use cosmic::{
     Task,
+    dialog::file_chooser,
     iced::{Length, Subscription},
 };
 use cosmic_ext_mail::{EmailBody, EmailView};
@@ -23,6 +24,8 @@ pub enum Message {
     BackToList,
     Retry,
     ShowRemoteImages,
+    SaveAttachment(u64, usize),
+    AttachmentSaved(Result<(), ()>),
     SetTheme(MailId, Option<bool>),
     Loaded(u64, Result<Arc<[u8]>, remote::Error>),
     Reply,
@@ -61,12 +64,50 @@ impl ComposeDetails {
     }
 }
 
+struct Attachment {
+    name: String,
+    size: usize,
+    part: usize,
+}
+
+impl Attachment {
+    fn list(message: &mail_parser::Message<'_>) -> Vec<Self> {
+        message
+            .attachments()
+            .enumerate()
+            .filter(|(_, part)| !part.is_inline())
+            .map(|(index, part)| {
+                let name = part
+                    .attachment_name()
+                    .and_then(|name| name.rsplit(['/', '\\']).next())
+                    .map(|name| {
+                        name.chars()
+                            .filter(|ch| !ch.is_control())
+                            .collect::<String>()
+                    })
+                    .and_then(|name| {
+                        let name = name.trim();
+                        (!matches!(name, "" | "." | "..")).then(|| name.to_owned())
+                    })
+                    .unwrap_or_else(|| fl!("mail-attachment-name", number = (index + 1)));
+                Self {
+                    name,
+                    size: part.decoded_len(),
+                    part: index,
+                }
+            })
+            .collect()
+    }
+}
+
 pub struct Reader {
     email: Option<EmailView>,
     theme_overrides: HashMap<MailId, bool>,
     body: Body,
     request: u64,
     recipients: Vec<Contact>,
+    attachments: Vec<Attachment>,
+    attachment_source: Option<Arc<[u8]>>,
     forward_text: String,
     reply_address: Option<String>,
     message_id: Option<String>,
@@ -88,6 +129,8 @@ impl Reader {
             body: Body::Empty,
             request: 0,
             recipients: Vec::new(),
+            attachments: Vec::new(),
+            attachment_source: None,
             forward_text: String::new(),
             reply_address: None,
             message_id: None,
@@ -98,6 +141,8 @@ impl Reader {
     pub fn release_window(&mut self) {
         self.request += 1;
         self.email = None;
+        self.attachments.clear();
+        self.attachment_source = None;
         self.body = Body::Empty;
     }
 
@@ -109,6 +154,8 @@ impl Reader {
         self.request += 1;
         self.body = Body::Empty;
         self.recipients.clear();
+        self.attachments.clear();
+        self.attachment_source = None;
         self.forward_text.clear();
         self.reply_address = None;
         self.message_id = None;
@@ -150,6 +197,12 @@ impl Reader {
                 self.recipients = Contact::from_list(addresses);
             }
 
+            if let Some(message) = message.as_ref() {
+                self.attachments = Attachment::list(message);
+            }
+            if !self.attachments.is_empty() {
+                self.attachment_source = Some(Arc::clone(&bytes));
+            }
             let body = EmailBody::Mime(&bytes);
             if let Some(view) = &mut self.email {
                 view.set_body_with_remote_images(body, load_remote_images)?;
@@ -166,6 +219,47 @@ impl Reader {
             Ok(()) => Body::Ready,
             Err(error) => Body::Failed(error),
         };
+    }
+
+    pub fn save_attachment(&self, request: u64, index: usize) -> Task<Message> {
+        if request != self.request {
+            return Task::none();
+        }
+        let (Some(file), Some(source)) =
+            (self.attachments.get(index), self.attachment_source.as_ref())
+        else {
+            return Task::none();
+        };
+        let name = file.name.clone();
+        let part = file.part;
+        let source = Arc::clone(source);
+        Task::perform(
+            async move {
+                let destination = match file_chooser::save::Dialog::new()
+                    .title(fl!("mail-save-attachment"))
+                    .file_name(name)
+                    .save_file()
+                    .await
+                {
+                    Ok(response) => {
+                        let Some(url) = response.url() else {
+                            return Ok(());
+                        };
+                        url.to_file_path().map_err(|_| ())?
+                    }
+                    Err(file_chooser::Error::Cancelled) => return Ok(()),
+                    Err(_) => return Err(()),
+                };
+                tokio::task::spawn_blocking(move || {
+                    let message = MessageParser::new().parse(&source).ok_or(())?;
+                    let attachment = message.attachments().nth(part).ok_or(())?;
+                    std::fs::write(destination, attachment.decoded()).map_err(|_| ())
+                })
+                .await
+                .map_err(|_| ())?
+            },
+            Message::AttachmentSaved,
+        )
     }
 
     pub fn set_remote_images(&mut self, enabled: bool) {
@@ -408,6 +502,30 @@ impl Reader {
         if let Some(actions) = trailing_actions {
             header = header.push(actions);
         }
+        if !self.attachments.is_empty() {
+            let mut files = widget::row::with_capacity(self.attachments.len()).spacing(6);
+            for (index, file) in self.attachments.iter().enumerate() {
+                let size = fl!(
+                    "attachment-size",
+                    size = format!("{:.1}", file.size as f64 / 1024.0)
+                );
+                files = files.push(
+                    widget::button::standard(fl!(
+                        "mail-attachment-label",
+                        name = file.name.as_str(),
+                        size = size.as_str()
+                    ))
+                    .leading_icon(widget::icon::from_name("mail-attachment-symbolic"))
+                    .on_press(Message::SaveAttachment(self.request, index)),
+                );
+            }
+            header = header
+                .push(widget::text::caption(fl!("mail-attachments")))
+                .push(
+                    widget::container(widget::scrollable(files.wrap()).height(Length::Shrink))
+                        .max_height(112),
+                );
+        }
         header.into()
     }
     fn more_menu(&self, mail: &Mail, style: MessageActions) -> Element<'static, Message> {
@@ -522,4 +640,39 @@ fn dropdown_menu(
     menu::bar(vec![menu::Tree::with_children(root, children)])
         .item_width(menu::ItemWidth::Uniform(220))
         .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn attachment_list_excludes_inline_parts_and_preserves_the_part_index() {
+        let raw = concat!(
+            "From: sender@example.org\r\nMIME-Version: 1.0\r\n",
+            "Content-Type: multipart/mixed; boundary=mail\r\n\r\n",
+            "--mail\r\nContent-Type: text/plain\r\n\r\nHello\r\n",
+            "--mail\r\nContent-Type: image/png\r\n",
+            "Content-Disposition: inline; filename=logo.png\r\n\r\ninline\r\n",
+            "--mail\r\nContent-Type: application/octet-stream\r\n",
+            "Content-Disposition: attachment; filename=\"../report.bin\"\r\n",
+            "Content-Transfer-Encoding: base64\r\n\r\nAAEC\r\n--mail--\r\n",
+        )
+        .as_bytes();
+
+        let message = MessageParser::new().parse(raw).expect("MIME message");
+        let attachments = Attachment::list(&message);
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0].name, "report.bin");
+        assert_eq!(attachments[0].size, 3);
+        assert_eq!(
+            message
+                .attachments()
+                .nth(attachments[0].part)
+                .unwrap()
+                .decoded()
+                .as_ref(),
+            &[0, 1, 2]
+        );
+    }
 }
