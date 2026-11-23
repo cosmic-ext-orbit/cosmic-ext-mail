@@ -85,6 +85,7 @@ mail-loading = Loading messages…
 mail-page = Page { $page } of { $total }
 mail-previous-page = Previous page
 mail-next-page = Next page
+mail-header-progress = Syncing message headers ({ $fetched } of { $total })
 mail-download-progress = Downloading messages for offline use ({ $saved } of { $total })
 mail-body-loading = Loading message…
 mail-refresh = Refresh
@@ -191,3 +192,7 @@ reply-attribution = { $sender } wrote:
 mail-delete-permanently = Delete permanently
 mail-delete-permanently-confirm = Permanently delete this message from Trash? This cannot be undone.
 mail-permanent-delete-unsupported = This mail server does not support permanently deleting a single message from Trash.
+
+mail-expand-thread = Expand thread
+mail-collapse-thread = Collapse thread
+mail-thread-count = { $count } messages

@@ -172,6 +172,7 @@ mod tests {
                     subject: String::new(),
                     time: String::new(),
                     timestamp: 0,
+                    thread: None,
                 })
                 .collect(),
         }

@@ -125,6 +125,7 @@ impl Mailbox {
 
         change.apply(&mut self.contents.messages, id);
         if moving {
+            self.invalidate_threads();
             self.selected = self
                 .selected
                 .and_then(|selection| match selection.cmp(&index) {
@@ -180,10 +181,15 @@ impl Mailbox {
             } else if move_failed {
                 self.contents.messages.push(pending.original.clone());
                 self.contents.sort();
+                self.invalidate_threads();
             }
 
             if next.is_some() {
+                let before = self.contents.messages.len();
                 pending.apply(&mut self.contents.messages);
+                if self.contents.messages.len() != before {
+                    self.invalidate_threads();
+                }
             }
             let restore = move_failed && pending.was_selected && selection.is_none();
             let selected = selection.as_ref().or(restore.then_some(id));

@@ -106,9 +106,20 @@ impl FolderContents {
 
 #[derive(Clone, Copy, Debug)]
 pub enum DownloadEvent {
+    HeadersStarted(usize),
+    HeadersFetched(usize),
+    HeadersFinished,
     Started(usize),
     Saved(usize),
     Finished,
+}
+
+struct HeaderProgress<'a>(&'a mpsc::UnboundedSender<DownloadEvent>);
+
+impl Drop for HeaderProgress<'_> {
+    fn drop(&mut self) {
+        let _ = self.0.send(DownloadEvent::HeadersFinished);
+    }
 }
 
 pub(super) async fn load(
@@ -303,9 +314,13 @@ fn sync_headers(
             current.contains_key(uid)
                 && headers
                     .get(uid)
-                    .is_none_or(|mail| mail.recipients.is_none())
+                    .is_none_or(|mail| mail.recipients.is_none() || mail.thread.is_none())
         })
         .collect();
+    let header_progress = (!missing.is_empty()).then(|| {
+        let _ = downloads.send(DownloadEvent::HeadersStarted(missing.len()));
+        HeaderProgress(downloads)
+    });
     for batch in missing.chunks(HEADER_BATCH_SIZE) {
         if downloads.is_closed() {
             return Err(Error::Fetch);
@@ -364,10 +379,16 @@ fn sync_headers(
                         .map(|date| date.format("%Y-%m-%d").to_string())
                         .unwrap_or_default(),
                     timestamp: date.map_or(i64::MIN, |date| date.timestamp()),
+                    thread: Some(header.as_ref().map_or_else(
+                        super::threads::ThreadHeaders::default,
+                        super::threads::ThreadHeaders::from_headers,
+                    )),
                 },
             ))
         }));
+        let _ = downloads.send(DownloadEvent::HeadersFetched(batch.len()));
     }
+    drop(header_progress);
     let mut sizes = HashMap::with_capacity(current.len());
     let messages = uids
         .into_iter()

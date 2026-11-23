@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
+use super::threads::ThreadHeaders;
 use crate::fl;
 use chrono::{Local, TimeZone};
 use cosmic::{Element, widget};
@@ -71,6 +72,8 @@ pub struct Mail {
     pub subject: String,
     pub time: String,
     pub timestamp: i64,
+    #[serde(default)]
+    pub thread: Option<ThreadHeaders>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

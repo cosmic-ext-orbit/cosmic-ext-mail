@@ -2,7 +2,11 @@
 
 use super::{CONTENT_GUTTER, Change, Folder, Mail, Mailbox, Message, SortOrder, Status};
 use crate::fl;
-use cosmic::iced::{Length, window};
+use cosmic::iced::{
+    Border, Color, Length, Rectangle, Size,
+    advanced::{Layout, Widget, layout, renderer, widget::Tree},
+    mouse, window,
+};
 use cosmic::widget::menu;
 use cosmic::{Element, widget};
 
@@ -32,7 +36,9 @@ impl Mailbox {
         photos: Option<&crate::features::avatars::Avatars>,
         window_id: Option<window::Id>,
     ) -> Element<'a, Message> {
-        let page = self.page(query, drafts.len());
+        let thread_rows = self.thread_rows(query);
+        let card_radius = cosmic::theme::active().cosmic().corner_radii.radius_s;
+        let page = self.page_for(drafts.len(), thread_rows.len());
         let mut rows = widget::column::with_capacity(self.contents.failures.len() + 3).spacing(4);
         if self.folder == Folder::Drafts {
             for (id, subject) in &drafts[page.drafts.clone()] {
@@ -74,13 +80,22 @@ impl Mailbox {
                     rows = rows.push(widget::text::body(empty));
                 }
                 let mut messages = widget::column::with_capacity(page.messages.len()).spacing(4);
-                for (position, (id, mail)) in self
-                    .matching_messages(query)
+                for (position, entry) in thread_rows
+                    .into_iter()
                     .skip(page.messages.start)
                     .take(page.messages.len())
                     .enumerate()
                 {
-                    let sender = if mail.unread {
+                    let mail = entry.mail;
+                    let unread = entry
+                        .summary
+                        .as_ref()
+                        .map_or(mail.unread, |thread| thread.unread);
+                    let flagged = entry
+                        .summary
+                        .as_ref()
+                        .map_or(mail.flagged, |thread| thread.flagged);
+                    let sender = if unread {
                         format!("• {}", mail.sender)
                     } else {
                         mail.sender.to_owned()
@@ -88,21 +103,38 @@ impl Mailbox {
                     let line =
                         widget::row::with_capacity(3)
                             .push(widget::text::body(sender).width(Length::Fill))
-                            .push_maybe(mail.flagged.then(|| {
+                            .push_maybe(flagged.then(|| {
                                 widget::icon::from_name("starred-symbolic").size(16).icon()
                             }))
                             .push(widget::text::caption(mail.display_time()))
                             .align_y(cosmic::iced::Alignment::Center)
                             .spacing(4);
-                    let subject = if mail.unread {
+                    let subject = if unread {
                         widget::text::body(mail.subject.as_str()).font(cosmic::font::bold())
                     } else {
                         widget::text::body(mail.subject.as_str())
                     };
-                    let row = widget::column::with_capacity(3)
+                    let thread_button = entry.summary.as_ref().map(|thread| {
+                        let tooltip = if thread.expanded {
+                            fl!("mail-collapse-thread")
+                        } else {
+                            fl!("mail-expand-thread")
+                        };
+                        widget::button::text(fl!("mail-thread-count", count = thread.count))
+                            .font_size(12)
+                            .line_height(17)
+                            .icon_size(14)
+                            .leading_icon(widget::icon::from_name("chat-symbolic"))
+                            .spacing(4)
+                            .padding([2, 8])
+                            .tooltip(tooltip)
+                            .on_press(Message::ToggleThread(thread.key.clone()))
+                    });
+                    let row = widget::column::with_capacity(4)
                         .push(line)
                         .push(subject)
                         .push(widget::text::caption(mail.account_email.as_str()))
+                        .push_maybe(thread_button)
                         .spacing(3);
                     let row: Element<_> = if show_sender_pictures {
                         widget::row::with_capacity(2)
@@ -119,12 +151,37 @@ impl Mailbox {
                     };
                     let button = widget::button::custom(row)
                         .id(self.row_ids[position].clone())
-                        .class(cosmic::theme::Button::ListItem([6.0; 4]))
+                        .class(cosmic::theme::Button::ListItem(card_radius))
                         .width(Length::Fill)
                         .padding(10)
-                        .selected(self.selected == Some(id))
-                        .on_press(Message::Select(id));
-                    messages = messages.push(self.row_menu(button, mail, window_id));
+                        .selected(self.selected == Some(entry.index))
+                        .on_press(Message::Select(mail.id.clone()));
+                    let row: Element<_> = widget::container(self.row_menu(button, mail, window_id))
+                        .width(Length::Fill)
+                        .padding(1)
+                        .style(|theme| {
+                            use cosmic::iced::widget::container::Catalog as _;
+
+                            let mut style = theme.style(&cosmic::theme::Container::Card);
+                            style.border.color = theme.current_container().component.divider.into();
+                            style.border.width = 1.0;
+                            style
+                        })
+                        .into();
+                    let row = if entry.parent.is_some() {
+                        let reply = widget::row::with_capacity(2)
+                            .push(widget::space::horizontal().width(24))
+                            .push(row);
+                        cosmic::iced::widget::Stack::new()
+                            .push(reply)
+                            .push(Element::new(ThreadConnector {
+                                last: entry.last_reply,
+                            }))
+                            .into()
+                    } else {
+                        row
+                    };
+                    messages = messages.push(row);
                 }
                 rows = rows.push(messages);
             }
@@ -277,5 +334,78 @@ impl Mailbox {
             .window_id(window_id.unwrap_or(window::Id::NONE))
             .on_surface_action(Message::MenuSurface)
             .into()
+    }
+}
+
+struct ThreadConnector {
+    last: bool,
+}
+
+impl Widget<Message, cosmic::Theme, cosmic::Renderer> for ThreadConnector {
+    fn size(&self) -> Size<Length> {
+        Size::new(Length::Fixed(24.0), Length::Fill)
+    }
+
+    fn layout(
+        &mut self,
+        _: &mut Tree,
+        _: &cosmic::Renderer,
+        limits: &layout::Limits,
+    ) -> layout::Node {
+        layout::Node::new(limits.resolve(Length::Fixed(24.0), Length::Fill, Size::ZERO))
+    }
+
+    fn draw(
+        &self,
+        _: &Tree,
+        renderer: &mut cosmic::Renderer,
+        theme: &cosmic::Theme,
+        _: &renderer::Style,
+        layout: Layout<'_>,
+        _: mouse::Cursor,
+        viewport: &Rectangle,
+    ) {
+        use cosmic::iced::advanced::Renderer as _;
+
+        let bounds = layout.bounds();
+        let center = bounds.center_x();
+        let marker_y = bounds.center_y();
+        let end = if self.last {
+            marker_y
+        } else {
+            bounds.y + bounds.height + 2.0
+        };
+        let color: Color = theme.cosmic().accent.base.into();
+        let color = Color { a: 0.65, ..color };
+        let mut y = bounds.y - 2.0;
+        while y + 2.0 <= end {
+            let dot = Rectangle::new([center - 1.0, y].into(), Size::new(2.0, 2.0));
+            if (dot.center_y() - marker_y).abs() >= 4.0 && viewport.intersects(&dot) {
+                renderer.fill_quad(
+                    renderer::Quad {
+                        bounds: dot,
+                        border: Border::default().rounded(1.0),
+                        ..Default::default()
+                    },
+                    color,
+                );
+            }
+            y += 5.0;
+        }
+        let marker = Rectangle::new([center - 2.5, marker_y - 2.5].into(), Size::new(5.0, 5.0));
+        if viewport.intersects(&marker) {
+            renderer.fill_quad(
+                renderer::Quad {
+                    bounds: marker,
+                    border: Border {
+                        color,
+                        width: 1.0,
+                        radius: 2.5.into(),
+                    },
+                    ..Default::default()
+                },
+                Color::TRANSPARENT,
+            );
+        }
     }
 }

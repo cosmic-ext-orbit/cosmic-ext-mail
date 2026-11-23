@@ -587,6 +587,10 @@ impl cosmic::Application for AppModel {
         };
 
         let fetching = match self.mailbox.fetch_activity() {
+            Some(FetchActivity::FetchingHeaders { fetched, total }) => Some((
+                fl!("mail-header-progress", fetched = fetched, total = total),
+                widget::determinate_linear(fetched as f32 / total as f32),
+            )),
             Some(FetchActivity::Downloading { saved, total }) => Some((
                 fl!("mail-download-progress", saved = saved, total = total),
                 widget::determinate_linear(saved as f32 / total as f32),
@@ -868,8 +872,19 @@ impl AppModel {
             mailbox::Message::MenuSurface(action) => {
                 return cosmic::surface::surface_task(action.map(Message::List));
             }
+            mailbox::Message::ToggleThread(key) => {
+                let query = self.search.query();
+                let selection = self.mailbox.toggle_thread(key, query).or_else(|| {
+                    self.mailbox
+                        .selection_for(query, self.composer.draft_count())
+                });
+                return self.select(selection);
+            }
             mailbox::Message::Select(id) => {
-                let task = self.select(Some(id));
+                let Some(index) = self.mailbox.message_index(&id) else {
+                    return Task::none();
+                };
+                let task = self.select(Some(index));
                 return Task::batch([task, self.open_selected()]);
             }
             mailbox::Message::Step(direction) => {

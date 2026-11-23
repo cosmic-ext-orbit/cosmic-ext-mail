@@ -6,6 +6,7 @@ mod list;
 mod model;
 mod notifications;
 pub mod remote;
+mod threads;
 
 pub use actions::Change;
 pub use list::{ComposeAction, RowAction};
@@ -16,13 +17,16 @@ use cosmic::iced::{
     widget::scrollable,
 };
 use cosmic::widget::{self, nav_bar};
+use std::{cell::RefCell, collections::HashSet};
+use threads::{ThreadRow, Threads};
 
 const MESSAGES_PER_PAGE: usize = 50;
 pub const CONTENT_GUTTER: u16 = 8;
 
 #[derive(Clone, Debug)]
 pub enum Message {
-    Select(usize),
+    Select(MailId),
+    ToggleThread(MailId),
     RowAction(MailId, RowAction),
     MenuSurface(cosmic::surface::Action<Message>),
     Step(isize),
@@ -53,8 +57,11 @@ pub struct Mailbox {
     syncing: bool,
     sync_task: Option<cosmic::iced::task::Handle>,
     downloads: Downloads,
+    headers: Downloads,
     status: Status,
     contents: remote::FolderContents,
+    threads: RefCell<Option<Threads>>,
+    expanded_threads: HashSet<MailId>,
     pending_changes: Vec<actions::PendingChange>,
 }
 
@@ -100,6 +107,7 @@ enum Status {
 pub enum FetchActivity {
     Checking,
     Downloading { saved: usize, total: usize },
+    FetchingHeaders { fetched: usize, total: usize },
 }
 
 pub enum Activity {
@@ -137,13 +145,22 @@ impl Mailbox {
             syncing: false,
             sync_task: None,
             downloads: Downloads::default(),
+            headers: Downloads::default(),
             status: Status::NoAccounts,
             contents: remote::FolderContents::default(),
+            threads: RefCell::new(None),
+            expanded_threads: HashSet::new(),
             pending_changes: Vec::new(),
         }
     }
 
     pub fn fetch_activity(&self) -> Option<FetchActivity> {
+        if self.headers.active > 0 {
+            return Some(FetchActivity::FetchingHeaders {
+                fetched: self.headers.saved,
+                total: self.headers.total,
+            });
+        }
         if self.downloads.active > 0 && self.downloads.total > 0 {
             return Some(FetchActivity::Downloading {
                 saved: self.downloads.saved,
@@ -172,6 +189,7 @@ impl Mailbox {
         self.selected = None;
         self.page = 0;
         self.contents = remote::FolderContents::default();
+        self.invalidate_threads();
         self.start_sync(accounts, true, true)
     }
 
@@ -212,6 +230,7 @@ impl Mailbox {
             self.request += 1;
             self.syncing = false;
             self.downloads = Downloads::default();
+            self.headers = Downloads::default();
         }
     }
 
@@ -225,6 +244,7 @@ impl Mailbox {
         self.request += 1;
         self.syncing = false;
         self.downloads = Downloads::default();
+        self.headers = Downloads::default();
         let saved = match accounts.saved() {
             Ok([]) => {
                 self.status = Status::NoAccounts;
@@ -271,13 +291,22 @@ impl Mailbox {
             return;
         }
         match event {
+            Some(remote::DownloadEvent::HeadersStarted(total)) => {
+                self.headers.active += 1;
+                self.headers.total += total;
+            }
+            Some(remote::DownloadEvent::HeadersFetched(count)) => self.headers.saved += count,
+            Some(remote::DownloadEvent::HeadersFinished) => self.headers.active -= 1,
             Some(remote::DownloadEvent::Started(total)) => {
                 self.downloads.active += 1;
                 self.downloads.total += total;
             }
             Some(remote::DownloadEvent::Saved(saved)) => self.downloads.saved += saved,
             Some(remote::DownloadEvent::Finished) => self.downloads.active -= 1,
-            None => self.downloads = Downloads::default(),
+            None => {
+                self.downloads = Downloads::default();
+                self.headers = Downloads::default();
+            }
         }
     }
 
@@ -305,6 +334,7 @@ impl Mailbox {
         let selection_removed = selection.is_some() && selected.is_none();
         self.selected = selected;
         self.contents = contents;
+        self.invalidate_threads();
         self.status = Status::Loaded;
         Some(selection_removed)
     }
@@ -393,17 +423,12 @@ impl Mailbox {
     }
 
     fn page(&self, query: &str, drafts: usize) -> Page {
+        self.page_for(drafts, self.thread_rows(query).len())
+    }
+
+    fn page_for(&self, drafts: usize, messages: usize) -> Page {
         let drafts = if self.folder == Folder::Drafts {
             drafts
-        } else {
-            0
-        };
-        let messages = if matches!(self.status, Status::Loaded) {
-            if query.trim().is_empty() {
-                self.contents.messages.len()
-            } else {
-                self.matching_messages(query).count()
-            }
         } else {
             0
         };
@@ -425,10 +450,12 @@ impl Mailbox {
         query: &'a str,
         drafts: usize,
     ) -> impl Iterator<Item = (usize, &'a Mail)> {
-        let range = self.page(query, drafts).messages;
-        self.matching_messages(query)
+        let rows = self.thread_rows(query);
+        let range = self.page_for(drafts, rows.len()).messages;
+        rows.into_iter()
             .skip(range.start)
             .take(range.len())
+            .map(|row| (row.index, row.mail))
     }
 
     pub fn turn_page(
@@ -472,17 +499,51 @@ impl Mailbox {
         self.reset_page()
     }
 
-    fn matching_messages<'a>(&'a self, query: &'a str) -> impl Iterator<Item = (usize, &'a Mail)> {
+    fn invalidate_threads(&mut self) {
+        self.threads.get_mut().take();
+    }
+
+    fn thread_rows(&self, query: &str) -> Vec<ThreadRow<'_>> {
+        if !matches!(self.status, Status::Loaded) {
+            return Vec::new();
+        }
         let messages = &self.contents.messages;
-        (0..messages.len())
-            .map(move |position| {
-                let index = match self.sort_order {
-                    SortOrder::NewestFirst => position,
-                    SortOrder::OldestFirst => messages.len() - 1 - position,
-                };
-                (index, &messages[index])
-            })
-            .filter(move |(_, mail)| mail.matches(query))
+        let mut threads = self.threads.borrow_mut();
+        if threads
+            .as_ref()
+            .is_none_or(|threads| threads.message_count() != messages.len())
+        {
+            *threads = Some(Threads::new(messages));
+        }
+        threads
+            .as_ref()
+            .unwrap()
+            .rows(messages, self.sort_order, query, &self.expanded_threads)
+    }
+
+    pub fn toggle_thread(&mut self, key: MailId, query: &str) -> Option<usize> {
+        if self.expanded_threads.contains(&key) {
+            let rows = self.thread_rows(query);
+            let select_parent = rows
+                .iter()
+                .any(|row| Some(row.index) == self.selected && row.parent == Some(&key));
+            let parent = select_parent
+                .then(|| {
+                    rows.iter()
+                        .find(|row| {
+                            row.summary
+                                .as_ref()
+                                .is_some_and(|summary| summary.key == &key)
+                        })
+                        .map(|row| row.index)
+                })
+                .flatten();
+            self.expanded_threads.remove(&key);
+            parent
+        } else {
+            self.expanded_threads.insert(key);
+            None
+        }
     }
 
     pub fn step_selection(
@@ -491,16 +552,17 @@ impl Mailbox {
         drafts: usize,
         step: isize,
     ) -> (Option<usize>, cosmic::Task<Message>) {
-        let page = self.page(query, drafts);
-        let Some(position) = self
-            .matching_messages(query)
-            .position(|(id, _)| Some(id) == self.selected)
+        let rows = self.thread_rows(query);
+        let page = self.page_for(drafts, rows.len());
+        let Some(position) = rows
+            .iter()
+            .position(|row| Some(row.index) == self.selected)
             .filter(|position| page.messages.contains(position))
         else {
             return (self.selection_for(query, drafts), cosmic::Task::none());
         };
         let position = position.saturating_add_signed(step);
-        let Some((id, _)) = self.matching_messages(query).nth(position) else {
+        let Some(id) = rows.get(position).map(|row| row.index) else {
             return (self.selected, cosmic::Task::none());
         };
         let drafts = if self.folder == Folder::Drafts {
@@ -508,6 +570,7 @@ impl Mailbox {
         } else {
             0
         };
+        drop(rows);
         self.page = (position + drafts) / MESSAGES_PER_PAGE;
         let scroll = match self.page.cmp(&page.index) {
             std::cmp::Ordering::Less => self.scroll_to(f32::MAX),
@@ -552,7 +615,60 @@ mod tests {
             subject: subject.into(),
             time: String::new(),
             timestamp: 4 - i64::from(uid),
+            thread: None,
         }
+    }
+
+    #[test]
+    fn threads_expand_by_reply_headers_and_keep_accounts_separate() {
+        let mut mailbox = Mailbox::new();
+        mailbox.status = Status::Loaded;
+        let with_headers = |uid, subject, headers: &str| {
+            let mut mail = mail(uid, subject);
+            let parsed = mail_parser::MessageParser::new()
+                .parse_headers(headers.as_bytes())
+                .unwrap();
+            mail.thread = Some(threads::ThreadHeaders::from_headers(&parsed));
+            mail
+        };
+        let reply = with_headers(
+            5,
+            "Later reply",
+            "Message-ID: <reply@example.org>\r\nReferences: <missing@example.org>\r\n",
+        );
+        let unrelated = mail(4, "Later reply");
+        let earlier = with_headers(
+            3,
+            "Earlier reply",
+            "Message-ID: <earlier@example.org>\r\nIn-Reply-To: <missing@example.org>\r\n",
+        );
+        let mut another_account = earlier.clone();
+        another_account.id.account = uuid::Uuid::new_v4();
+        mailbox.contents.messages = vec![reply, unrelated, earlier, another_account];
+
+        let rows = mailbox.thread_rows("");
+        assert_eq!(
+            rows.iter().map(|row| row.index).collect::<Vec<_>>(),
+            [0, 1, 3]
+        );
+        let thread = rows[0].summary.as_ref().unwrap();
+        assert_eq!(thread.count, 2);
+        let key = thread.key.clone();
+
+        assert_eq!(mailbox.toggle_thread(key.clone(), ""), None);
+        let rows = mailbox.thread_rows("");
+        assert_eq!(
+            rows.iter().map(|row| row.index).collect::<Vec<_>>(),
+            [0, 2, 1, 3]
+        );
+        assert_eq!(rows[1].parent, Some(&key));
+        assert!(mailbox.set_selection(Some(0)));
+        assert_eq!(mailbox.step_selection("", 0, 1).0, Some(2));
+        assert_eq!(mailbox.thread_rows("Earlier")[0].index, 2);
+
+        assert!(mailbox.set_selection(Some(2)));
+        assert_eq!(mailbox.toggle_thread(key, ""), Some(0));
+        assert_eq!(mailbox.thread_rows("").len(), 3);
     }
 
     #[test]
