@@ -4,7 +4,7 @@ use lettre::Address;
 use uuid::Uuid;
 use zbus::{Connection, proxy, zvariant::OwnedObjectPath};
 
-use super::{Account, Error, Password};
+use super::{Account, Error, Password, connection::Authentication};
 
 #[derive(serde::Deserialize, zbus::zvariant::Type)]
 pub(in crate::features) struct MailConnectionSettings {
@@ -21,7 +21,7 @@ impl MailConnectionSettings {
     fn supported(&self) -> bool {
         self.imap_tls == "tls"
             && matches!(self.smtp_tls.as_str(), "tls" | "starttls")
-            && self.authentication == "xoauth2"
+            && matches!(self.authentication.as_str(), "xoauth2" | "password")
             && !self.imap_host.is_empty()
             && !self.smtp_host.is_empty()
             && self.imap_port != 0
@@ -76,6 +76,7 @@ trait MailEndpoint {
     interface = "dev.edfloreshz.Accounts.Credentials"
 )]
 trait Credentials {
+    fn get_mail_password(&self) -> zbus::Result<(MailConnectionSettings, String, String)>;
     fn get_mail_access(&self) -> zbus::Result<(MailConnectionSettings, String, i64)>;
     fn invalidate_token(&self) -> zbus::Result<()>;
 }
@@ -152,21 +153,50 @@ async fn mail_account(
     }))
 }
 
-pub(super) async fn mail_access(
-    id: Uuid,
-    refresh: bool,
-) -> Result<(MailConnectionSettings, Password), Error> {
+pub(super) async fn mail_access(id: Uuid, refresh: bool) -> Result<Authentication, Error> {
     let connection = Connection::session().await.map_err(broker_error)?;
     let path = format!(
         "/dev/edfloreshz/Accounts/Accounts/{}",
         id.to_string().replace('-', "_")
     );
+    let advertised = MailEndpointProxy::builder(&connection)
+        .path(path.as_str())
+        .map_err(broker_error)?
+        .build()
+        .await
+        .map_err(broker_error)?
+        .get_connection_settings()
+        .await
+        .map_err(broker_error)?;
+    if !advertised.supported() {
+        return Err(Error::OnlineDisabled);
+    }
     let credentials = CredentialsProxy::builder(&connection)
         .path(path)
         .map_err(broker_error)?
         .build()
         .await
         .map_err(broker_error)?;
+    if advertised.authentication == "password" {
+        let (settings, username, password) = credentials
+            .get_mail_password()
+            .await
+            .map_err(broker_error)?;
+        if !settings.supported()
+            || settings.authentication != "password"
+            || username.is_empty()
+            || username.chars().any(char::is_control)
+            || password.is_empty()
+            || password.contains(['\r', '\n', '\0'])
+        {
+            return Err(Error::OnlineDisabled);
+        }
+        return Ok(Authentication::ManagedPassword(
+            settings,
+            username,
+            Password(password),
+        ));
+    }
     if refresh {
         credentials.invalidate_token().await.map_err(broker_error)?;
     }
@@ -174,10 +204,10 @@ pub(super) async fn mail_access(
     if token.is_empty() || token.chars().any(char::is_control) {
         return Err(Error::OnlineReconnect);
     }
-    if !settings.supported() {
+    if !settings.supported() || settings.authentication != "xoauth2" {
         return Err(Error::OnlineDisabled);
     }
-    Ok((settings, Password(token)))
+    Ok(Authentication::OAuth(settings, Password(token)))
 }
 
 fn broker_error(error: zbus::Error) -> Error {
