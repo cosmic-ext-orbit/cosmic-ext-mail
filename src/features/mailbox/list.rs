@@ -71,6 +71,7 @@ impl Mailbox {
                 if page.messages.is_empty()
                     && self.contents.failures.is_empty()
                     && page.drafts.is_empty()
+                    && !self.syncing
                 {
                     let empty = if query.trim().is_empty() {
                         fl!("folder-empty")

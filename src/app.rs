@@ -963,6 +963,21 @@ impl AppModel {
             mailbox::Message::AddAccount => {
                 return self.update(Message::Accounts(accounts::Message::Add));
             }
+            mailbox::Message::Download(
+                request,
+                Some(mailbox::remote::DownloadEvent::HeadersReady(batch)),
+            ) => {
+                if let Some(selection_removed) = self.mailbox.apply_header_batch(request, batch) {
+                    let selection = self
+                        .mailbox
+                        .selection_for(self.search.query(), self.composer.draft_count());
+                    if selection_removed && selection.is_none() {
+                        self.reader.set_open(false);
+                        return self.load_body();
+                    }
+                    return self.select(selection);
+                }
+            }
             mailbox::Message::Download(request, event) => {
                 self.mailbox.update_download(request, event)
             }

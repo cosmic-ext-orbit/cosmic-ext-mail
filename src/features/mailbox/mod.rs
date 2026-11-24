@@ -276,7 +276,7 @@ impl Mailbox {
         };
         let sync = cosmic::Task::batch([
             cosmic::Task::perform(
-                remote::load(saved, self.folder, send, prefetch),
+                remote::load(saved, self.folder, send, prefetch, true),
                 move |contents| Message::Loaded(request, contents),
             ),
             cosmic::Task::run(progress, move |event| Message::Download(request, event)),
@@ -296,6 +296,9 @@ impl Mailbox {
                 self.headers.total += total;
             }
             Some(remote::DownloadEvent::HeadersFetched(count)) => self.headers.saved += count,
+            Some(remote::DownloadEvent::HeadersReady(_)) => {
+                unreachable!("header batches are applied separately")
+            }
             Some(remote::DownloadEvent::HeadersFinished) => self.headers.active -= 1,
             Some(remote::DownloadEvent::Started(total)) => {
                 self.downloads.active += 1;
@@ -308,6 +311,38 @@ impl Mailbox {
                 self.headers = Downloads::default();
             }
         }
+    }
+
+    pub fn apply_header_batch(&mut self, request: u64, mut batch: Vec<Mail>) -> Option<bool> {
+        if request != self.request || !self.syncing {
+            return None;
+        }
+        let incoming = batch.first()?.id.clone();
+        let selection = self.selected().map(|mail| mail.id.clone());
+        if matches!(self.status, Status::Loading) {
+            self.contents = remote::FolderContents::default();
+        }
+
+        for pending in self
+            .pending_changes
+            .iter()
+            .filter(|pending| pending.folder == self.folder)
+        {
+            pending.apply(&mut batch);
+        }
+        let received: HashSet<_> = batch.iter().map(|mail| &mail.id).collect();
+        self.contents.messages.retain(|mail| {
+            (mail.id.account != incoming.account
+                || (mail.id.folder == incoming.folder
+                    && mail.id.uid_validity == incoming.uid_validity))
+                && !received.contains(&mail.id)
+        });
+        self.contents.messages.extend(batch);
+        self.contents.sort();
+        self.selected = selection.as_ref().and_then(|id| self.message_index(id));
+        self.invalidate_threads();
+        self.status = Status::Loaded;
+        Some(selection.is_some() && self.selected.is_none())
     }
 
     pub fn finish_load(
@@ -617,6 +652,42 @@ mod tests {
             timestamp: 4 - i64::from(uid),
             thread: None,
         }
+    }
+
+    #[test]
+    fn streamed_headers_preserve_selection_and_ignore_old_requests() {
+        let mut mailbox = Mailbox::new();
+        mailbox.status = Status::Loading;
+        mailbox.request = 3;
+        mailbox.syncing = true;
+        let first = mail(5, "First visible");
+        let mut newer = first.clone();
+        newer.id.uid = 6;
+        newer.timestamp += 1;
+
+        assert_eq!(
+            mailbox.apply_header_batch(3, vec![first.clone()]),
+            Some(false)
+        );
+        assert!(mailbox.set_selection(Some(0)));
+        assert_eq!(
+            mailbox.apply_header_batch(3, vec![newer.clone(), first.clone()]),
+            Some(false)
+        );
+        assert_eq!(mailbox.contents.messages.len(), 2);
+        assert_eq!(mailbox.contents.messages[0].id, newer.id);
+        assert_eq!(mailbox.selected().unwrap().id, first.id);
+
+        assert_eq!(
+            mailbox.apply_header_batch(2, vec![mail(9, "Old request")]),
+            None
+        );
+        mailbox.syncing = false;
+        assert_eq!(
+            mailbox.apply_header_batch(3, vec![mail(10, "Late batch")]),
+            None
+        );
+        assert_eq!(mailbox.contents.messages.len(), 2);
     }
 
     #[test]

@@ -17,7 +17,9 @@ use tokio::sync::{Semaphore, mpsc, oneshot};
 type Session = imap::Session<native_tls::TlsStream<TcpStream>>;
 
 const METADATA_BATCH_SIZE: usize = 500;
-const HEADER_BATCH_SIZE: usize = 100;
+const FIRST_HEADER_BATCH_SIZE: usize = 50;
+const HEADER_BATCH_SIZE: usize = 250;
+const HEADER_UPDATE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
 const MAX_BODY_BYTES: usize = 25 * 1024 * 1024;
 const SMALL_BODY_BYTES: usize = 256 * 1024;
 static SYNC_SLOTS: Semaphore = Semaphore::const_new(4);
@@ -104,10 +106,11 @@ impl FolderContents {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub enum DownloadEvent {
     HeadersStarted(usize),
     HeadersFetched(usize),
+    HeadersReady(Vec<Mail>),
     HeadersFinished,
     Started(usize),
     Saved(usize),
@@ -127,12 +130,13 @@ pub(super) async fn load(
     folder: Folder,
     downloads: mpsc::UnboundedSender<DownloadEvent>,
     prefetch: bool,
+    stream_headers: bool,
 ) -> FolderContents {
     let mut results = stream::iter(accounts.into_iter().map(|account| {
         let downloads = downloads.clone();
         async move {
             let email = account.email.clone();
-            match sync(account.clone(), folder, downloads, prefetch).await {
+            match sync(account.clone(), folder, downloads, prefetch, stream_headers).await {
                 Ok(snapshot) => (email, Some(snapshot), None),
                 Err(error) => {
                     let snapshot = tokio::task::spawn_blocking(move || {
@@ -162,7 +166,7 @@ pub(super) async fn load(
 
 pub(crate) async fn poll_inbox(accounts: Vec<Account>) -> bool {
     let (downloads, _progress) = mpsc::unbounded_channel();
-    load(accounts, Folder::Inbox, downloads, false)
+    load(accounts, Folder::Inbox, downloads, false, false)
         .await
         .failures
         .is_empty()
@@ -173,6 +177,7 @@ async fn sync(
     folder: Folder,
     downloads: mpsc::UnboundedSender<DownloadEvent>,
     prefetch: bool,
+    stream_headers: bool,
 ) -> Result<Snapshot, Error> {
     let (send, receive) = oneshot::channel();
     let mut worker = tokio::spawn(async move {
@@ -191,7 +196,15 @@ async fn sync(
                 .and_then(|cache| cache.sync_lock(folder).ok());
             let cache = cache.filter(|_| lock.is_some());
             let previous = cache.as_ref().and_then(|cache| cache.snapshot(folder));
-            let (snapshot, sizes) = sync_headers(session, &account, folder, previous, &downloads)?;
+            let (snapshot, sizes) = sync_headers(
+                session,
+                &account,
+                folder,
+                previous,
+                cache.as_ref(),
+                &downloads,
+                stream_headers,
+            )?;
             if downloads.is_closed() {
                 return Ok(());
             }
@@ -248,11 +261,13 @@ async fn sync(
 }
 
 fn sync_headers(
-    session: &mut Session,
+    session: &mut imap::Session<impl std::io::Read + std::io::Write>,
     account: &Account,
     folder: Folder,
     previous: Option<Snapshot>,
+    cache: Option<&Cache>,
     downloads: &mpsc::UnboundedSender<DownloadEvent>,
+    stream_headers: bool,
 ) -> Result<(Snapshot, HashMap<u32, Option<u32>>), Error> {
     let path = if folder == Folder::Inbox {
         "INBOX".to_owned()
@@ -282,59 +297,66 @@ fn sync_headers(
         .into_iter()
         .collect();
     uids.sort_unstable();
-    let mut current = HashMap::with_capacity(uids.len());
-    for batch in uids.chunks(METADATA_BATCH_SIZE) {
-        if downloads.is_closed() {
-            return Err(Error::Fetch);
-        }
-        let flags = session
-            .uid_fetch(uid_set(batch.iter().copied()), "(UID FLAGS RFC822.SIZE)")
-            .map_err(|_| Error::Fetch)?;
-        current.extend(flags.iter().filter_map(|item| {
-            Some((
-                item.uid?,
-                (
-                    !item.flags().contains(&Flag::Seen),
-                    item.flags().contains(&Flag::Flagged),
-                    item.size,
-                ),
-            ))
-        }));
-    }
     let mut headers = previous
         .into_iter()
         .flat_map(|snapshot| snapshot.messages)
-        .filter(|mail| mail.id.folder == path && mail.id.uid_validity == uid_validity)
+        .filter(|mail| {
+            mail.id.folder == path
+                && mail.id.uid_validity == uid_validity
+                && uids.binary_search(&mail.id.uid).is_ok()
+        })
         .map(|mail| (mail.id.uid, mail))
         .collect::<HashMap<_, _>>();
-    let missing: Vec<_> = uids
-        .iter()
-        .copied()
-        .filter(|uid| {
-            current.contains_key(uid)
-                && headers
-                    .get(uid)
-                    .is_none_or(|mail| mail.recipients.is_none() || mail.thread.is_none())
-        })
-        .collect();
+    let (mut cached, missing): (Vec<_>, Vec<_>) = uids.iter().rev().copied().partition(|uid| {
+        headers
+            .get(uid)
+            .is_some_and(|mail| mail.recipients.is_some() && mail.thread.is_some())
+    });
+    let mut sizes = HashMap::with_capacity(uids.len());
     let header_progress = (!missing.is_empty()).then(|| {
         let _ = downloads.send(DownloadEvent::HeadersStarted(missing.len()));
         HeaderProgress(downloads)
     });
-    for batch in missing.chunks(HEADER_BATCH_SIZE) {
-        if downloads.is_closed() {
-            return Err(Error::Fetch);
-        }
-        let fetched = session
-            .uid_fetch(
-                uid_set(batch.iter().copied()),
-                "(UID INTERNALDATE BODY.PEEK[HEADER])",
-            )
-            .map_err(|_| Error::Fetch)?;
-        let parser = MessageParser::default();
-        headers.extend(fetched.iter().filter_map(|item| {
-            let uid = item.uid?;
-            let header = parser.parse_headers(item.header()?);
+
+    let parser = MessageParser::default();
+    let mut pending = Vec::new();
+    let mut last_update = None;
+    let mut fetched_since_checkpoint = false;
+    let mut processed = 0;
+    let mut next_checkpoint = FIRST_HEADER_BATCH_SIZE;
+    let first = missing.len().min(FIRST_HEADER_BATCH_SIZE);
+    let batches = [&missing[..first]]
+        .into_iter()
+        .filter(|batch| !batch.is_empty())
+        .chain(missing[first..].chunks(HEADER_BATCH_SIZE));
+    for batch in batches {
+        let fetched = if downloads.is_closed() {
+            Err(Error::Fetch)
+        } else {
+            session
+                .uid_fetch(
+                    uid_set(batch.iter().copied()),
+                    "(UID FLAGS RFC822.SIZE INTERNALDATE BODY.PEEK[HEADER])",
+                )
+                .map_err(|_| Error::Fetch)
+        };
+        let fetched = match fetched {
+            Ok(fetched) => fetched,
+            Err(error) => {
+                if fetched_since_checkpoint {
+                    save_header_checkpoint(cache, folder, uid_validity, &headers);
+                }
+                return Err(error);
+            }
+        };
+        for item in fetched.iter() {
+            let (Some(uid), Some(bytes)) = (item.uid, item.header()) else {
+                continue;
+            };
+            if batch.binary_search_by(|probe| uid.cmp(probe)).is_err() {
+                continue;
+            }
+            let header = parser.parse_headers(bytes);
             let from = header
                 .as_ref()
                 .and_then(|header| header.from())
@@ -344,62 +366,112 @@ fn sync_headers(
                 .and_then(|from| from.address())
                 .unwrap_or_default();
             let date = item.internal_date();
-            Some((
-                uid,
-                Mail {
-                    id: MailId {
-                        account: account.id,
-                        folder: path.clone(),
-                        uid_validity,
-                        uid,
-                    },
-                    account_email: account.email.clone(),
-                    unread: false,
-                    flagged: false,
-                    sender: from
-                        .as_ref()
-                        .and_then(|from| from.name())
-                        .filter(|name| !name.is_empty())
-                        .or_else(|| (!address.is_empty()).then_some(address))
-                        .map_or_else(|| fl!("mail-unknown-sender"), str::to_owned),
-                    address: address.to_owned(),
-                    recipients: Some(
-                        header
-                            .as_ref()
-                            .and_then(|header| header.to())
-                            .map(Contact::from_list)
-                            .unwrap_or_default(),
-                    ),
-                    subject: header
-                        .as_ref()
-                        .and_then(|header| header.subject())
-                        .filter(|subject| !subject.is_empty())
-                        .map_or_else(|| fl!("mail-no-subject"), str::to_owned),
-                    time: date
-                        .map(|date| date.format("%Y-%m-%d").to_string())
-                        .unwrap_or_default(),
-                    timestamp: date.map_or(i64::MIN, |date| date.timestamp()),
-                    thread: Some(header.as_ref().map_or_else(
-                        super::threads::ThreadHeaders::default,
-                        super::threads::ThreadHeaders::from_headers,
-                    )),
+            let mail = Mail {
+                id: MailId {
+                    account: account.id,
+                    folder: path.clone(),
+                    uid_validity,
+                    uid,
                 },
-            ))
-        }));
+                account_email: account.email.clone(),
+                unread: !item.flags().contains(&Flag::Seen),
+                flagged: item.flags().contains(&Flag::Flagged),
+                sender: from
+                    .as_ref()
+                    .and_then(|from| from.name())
+                    .filter(|name| !name.is_empty())
+                    .or_else(|| (!address.is_empty()).then_some(address))
+                    .map_or_else(|| fl!("mail-unknown-sender"), str::to_owned),
+                address: address.to_owned(),
+                recipients: Some(
+                    header
+                        .as_ref()
+                        .and_then(|header| header.to())
+                        .map(Contact::from_list)
+                        .unwrap_or_default(),
+                ),
+                subject: header
+                    .as_ref()
+                    .and_then(|header| header.subject())
+                    .filter(|subject| !subject.is_empty())
+                    .map_or_else(|| fl!("mail-no-subject"), str::to_owned),
+                time: date
+                    .map(|date| date.format("%Y-%m-%d").to_string())
+                    .unwrap_or_default(),
+                timestamp: date.map_or(i64::MIN, |date| date.timestamp()),
+                thread: Some(header.as_ref().map_or_else(
+                    super::threads::ThreadHeaders::default,
+                    super::threads::ThreadHeaders::from_headers,
+                )),
+            };
+            if stream_headers {
+                pending.push(mail.clone());
+            }
+            sizes.insert(uid, item.size);
+            headers.insert(uid, mail);
+            fetched_since_checkpoint = true;
+        }
+        processed += batch.len();
+        if !pending.is_empty()
+            && last_update
+                .is_none_or(|last: std::time::Instant| last.elapsed() >= HEADER_UPDATE_INTERVAL)
+        {
+            let _ = downloads.send(DownloadEvent::HeadersReady(std::mem::take(&mut pending)));
+            last_update = Some(std::time::Instant::now());
+        }
         let _ = downloads.send(DownloadEvent::HeadersFetched(batch.len()));
+
+        // Keep a recoverable cache without rewriting the whole index for every batch.
+        if fetched_since_checkpoint && processed >= next_checkpoint && processed < missing.len() {
+            save_header_checkpoint(cache, folder, uid_validity, &headers);
+            fetched_since_checkpoint = false;
+            next_checkpoint = processed.saturating_mul(2);
+        }
+    }
+    if !pending.is_empty() {
+        let _ = downloads.send(DownloadEvent::HeadersReady(pending));
     }
     drop(header_progress);
-    let mut sizes = HashMap::with_capacity(current.len());
+    if downloads.is_closed() {
+        if fetched_since_checkpoint {
+            save_header_checkpoint(cache, folder, uid_validity, &headers);
+        }
+        return Err(Error::Fetch);
+    }
+    cached.reverse();
+    for batch in cached.chunks(METADATA_BATCH_SIZE) {
+        let flags = if downloads.is_closed() {
+            Err(Error::Fetch)
+        } else {
+            session
+                .uid_fetch(uid_set(batch.iter().copied()), "(UID FLAGS RFC822.SIZE)")
+                .map_err(|_| Error::Fetch)
+        };
+        let flags = match flags {
+            Ok(flags) => flags,
+            Err(error) => {
+                if fetched_since_checkpoint {
+                    save_header_checkpoint(cache, folder, uid_validity, &headers);
+                }
+                return Err(error);
+            }
+        };
+        for item in flags.iter() {
+            let Some(uid) = item.uid else { continue };
+            if batch.binary_search(&uid).is_err() {
+                continue;
+            }
+            if let Some(mail) = headers.get_mut(&uid) {
+                mail.unread = !item.flags().contains(&Flag::Seen);
+                mail.flagged = item.flags().contains(&Flag::Flagged);
+                sizes.insert(uid, item.size);
+            }
+        }
+    }
     let messages = uids
         .into_iter()
-        .filter_map(|uid| {
-            let (unread, flagged, size) = current.remove(&uid)?;
-            let mut mail = headers.remove(&uid)?;
-            mail.unread = unread;
-            mail.flagged = flagged;
-            sizes.insert(uid, size);
-            Some(mail)
-        })
+        .filter(|uid| sizes.contains_key(uid))
+        .filter_map(|uid| headers.remove(&uid))
         .collect();
     Ok((
         Snapshot {
@@ -410,10 +482,48 @@ fn sync_headers(
     ))
 }
 
+fn save_header_checkpoint(
+    cache: Option<&Cache>,
+    folder: Folder,
+    uid_validity: u32,
+    headers: &HashMap<u32, Mail>,
+) {
+    if let Some(cache) = cache {
+        let mut messages: Vec<_> = headers.values().cloned().collect();
+        messages.sort_unstable_by_key(|mail| mail.id.uid);
+        let _ = cache.save_snapshot(
+            folder,
+            &Snapshot {
+                messages,
+                uid_validity: Some(uid_validity),
+            },
+        );
+    }
+}
+
 fn uid_set(uids: impl Iterator<Item = u32>) -> String {
-    uids.map(|uid| uid.to_string())
-        .collect::<Vec<_>>()
-        .join(",")
+    use std::fmt::Write;
+
+    let mut uids = uids.peekable();
+    let mut set = String::new();
+    while let Some(first) = uids.next() {
+        let mut last = first;
+        while let Some(&next) = uids.peek() {
+            if next.abs_diff(last) != 1 || (last != first && (next > last) != (last > first)) {
+                break;
+            }
+            last = uids.next().expect("peeked UID");
+        }
+        if !set.is_empty() {
+            set.push(',');
+        }
+        if last == first {
+            let _ = write!(set, "{first}");
+        } else {
+            let _ = write!(set, "{}:{}", first.min(last), first.max(last));
+        }
+    }
+    set
 }
 
 fn prefetch_bodies(
@@ -637,4 +747,134 @@ pub async fn body(account: Account, id: MailId) -> Result<Arc<[u8]>, Error> {
         Ok(Arc::from(body))
     })
     .await
+}
+
+#[cfg(test)]
+mod header_tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires loopback TCP"]
+    fn cold_sync_publishes_recent_headers_before_requesting_older_mail() {
+        use std::{
+            io::{BufRead, BufReader, Write},
+            net::TcpListener,
+            time::Duration,
+        };
+
+        fn command(socket: &mut BufReader<TcpStream>, expected: &str) -> String {
+            let mut line = String::new();
+            socket.read_line(&mut line).unwrap();
+            let (tag, request) = line.trim_end().split_once(' ').unwrap();
+            assert_eq!(request, expected);
+            tag.to_owned()
+        }
+
+        fn reply_with_headers(
+            socket: &mut TcpStream,
+            tag: &str,
+            uids: std::ops::RangeInclusive<u32>,
+        ) {
+            for uid in uids {
+                let bytes = format!(
+                    "From: sender@example.org\r\nTo: inbox@example.org\r\nSubject: Message {uid}\r\n\r\n"
+                );
+                write!(socket, "* {uid} FETCH (UID {uid} FLAGS () RFC822.SIZE 123 INTERNALDATE \"24-Nov-2026 12:00:00 +0000\" BODY[HEADER] {{{}}}\r\n{bytes})\r\n", bytes.len()).unwrap();
+            }
+            write!(socket, "{tag} OK fetched\r\n").unwrap();
+        }
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let (events, mut received) = mpsc::unbounded_channel();
+        let server = std::thread::spawn(move || {
+            let (socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut socket = BufReader::new(socket);
+            writeln!(socket.get_mut(), "* OK ready\r").unwrap();
+            let tag = command(&mut socket, "LOGIN \"test\" \"fixture\"");
+            write!(socket.get_mut(), "{tag} OK logged in\r\n").unwrap();
+            let tag = command(&mut socket, "EXAMINE \"INBOX\"");
+            write!(
+                socket.get_mut(),
+                "* 52 EXISTS\r\n* OK [UIDVALIDITY 1] ready\r\n{tag} OK examined\r\n"
+            )
+            .unwrap();
+            let tag = command(&mut socket, "UID SEARCH ALL");
+            let uids = (1..=52)
+                .map(|uid| uid.to_string())
+                .collect::<Vec<_>>()
+                .join(" ");
+            write!(socket.get_mut(), "* SEARCH {uids}\r\n{tag} OK searched\r\n").unwrap();
+
+            let tag = command(
+                &mut socket,
+                "UID FETCH 3:52 (UID FLAGS RFC822.SIZE INTERNALDATE BODY.PEEK[HEADER])",
+            );
+            reply_with_headers(socket.get_mut(), &tag, 3..=52);
+            let tag = command(
+                &mut socket,
+                "UID FETCH 1:2 (UID FLAGS RFC822.SIZE INTERNALDATE BODY.PEEK[HEADER])",
+            );
+            assert!(matches!(
+                received.try_recv(),
+                Ok(DownloadEvent::HeadersStarted(52))
+            ));
+            let Ok(DownloadEvent::HeadersReady(recent)) = received.try_recv() else {
+                panic!("recent headers were not delivered before older mail was requested");
+            };
+            assert_eq!(recent.len(), 50);
+            assert_eq!(recent.iter().map(|mail| mail.id.uid).max(), Some(52));
+            reply_with_headers(socket.get_mut(), &tag, 1..=2);
+            received
+        });
+
+        let socket = TcpStream::connect(address).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut client = imap::Client::new(socket);
+        client.read_greeting().unwrap();
+        let mut session = client.login("test", "fixture").unwrap();
+        let account = Account {
+            id: uuid::Uuid::new_v4(),
+            email: "inbox@example.org".into(),
+            username: "test".into(),
+            imap_host: "localhost".into(),
+            imap_port: 993,
+            smtp_host: "localhost".into(),
+            smtp_port: 587,
+            smtp_starttls: true,
+            online: false,
+        };
+        let (snapshot, _) = sync_headers(
+            &mut session,
+            &account,
+            Folder::Inbox,
+            None,
+            None,
+            &events,
+            true,
+        )
+        .unwrap();
+        assert_eq!(snapshot.messages.len(), 52);
+        let mut received = server.join().unwrap();
+        assert!(
+            std::iter::from_fn(|| received.try_recv().ok()).any(|event| {
+                matches!(event, DownloadEvent::HeadersReady(older) if older.len() == 2)
+            })
+        );
+    }
+
+    #[test]
+    fn compresses_uid_ranges_without_fetching_missing_uids() {
+        assert_eq!(uid_set([1, 2, 3, 7, 10, 11].into_iter()), "1:3,7,10:11");
+        assert_eq!(uid_set([11, 10, 7, 3, 2, 1].into_iter()), "10:11,7,1:3");
+        assert_eq!(
+            uid_set([u32::MAX, u32::MAX - 1].into_iter()),
+            "4294967294:4294967295"
+        );
+    }
 }
