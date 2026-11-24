@@ -2,7 +2,7 @@
     <img src="resources/icons/hicolor/scalable/apps/icon.svg" width="250" alt="Mail app icon" />
     <h1>Mail</h1>
     <h3>Your inbox, in focus.</h3>
-    <p>A mail client for the COSMIC desktop</p>
+    <p>A mail client for the COSMIC™ desktop</p>
 </div>
 
 ![color-schemes-light.png](https://github.com/user-attachments/assets/1db1920a-7ca1-4578-a048-2cada8baf749#gh-light-mode-only)
