@@ -33,8 +33,11 @@ impl Cache {
             .filter(|path| path.is_absolute())
             .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))?;
         // Account edits preserve the UUID, so scope cached data to the IMAP identity too.
-        let identity =
-            serde_json::to_vec(&(&account.imap_host, account.imap_port, &account.username)).ok()?;
+        let identity = if account.microsoft_graph {
+            serde_json::to_vec(&("microsoft-graph", &account.email)).ok()?
+        } else {
+            serde_json::to_vec(&(&account.imap_host, account.imap_port, &account.username)).ok()?
+        };
         Some(Self(
             root.join("dev.edfloreshz.Mail")
                 .join("mail-v1")
@@ -116,6 +119,12 @@ impl Cache {
     }
 
     pub fn body_path(&self, id: &MailId) -> PathBuf {
+        if let Some(graph_id) = &id.graph_id {
+            return self
+                .0
+                .join("bodies")
+                .join(format!("{:x}", Sha256::digest(graph_id.as_bytes())));
+        }
         self.0
             .join("bodies")
             .join(format!("{:x}", Sha256::digest(id.folder.as_bytes())))
@@ -162,6 +171,7 @@ mod tests {
                         folder: "INBOX".into(),
                         uid_validity,
                         uid,
+                        graph_id: None,
                     },
                     account_email: String::new(),
                     unread,

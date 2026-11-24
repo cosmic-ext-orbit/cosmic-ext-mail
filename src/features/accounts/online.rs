@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-use accounts::{AccountsClient, MailCredentials};
+use accounts::{AccountsClient, MailCredentials, models::Service};
 use cosmic::iced::{
     Subscription,
     futures::{StreamExt, stream},
@@ -16,41 +16,88 @@ pub(super) use accounts::MailConnectionSettings;
 /// Returns a list of all available mail accounts, filtering out any invalid email addresses.
 pub(super) async fn available() -> Result<Vec<Account>, Error> {
     let client = AccountsClient::connect().await.map_err(Error::from)?;
+    let mail = client.list_mail_accounts().await;
+    let graph = client.list_enabled_accounts(Service::Email).await;
     let mut accounts = Vec::new();
+    let graph_ids: std::collections::HashSet<_> = graph
+        .as_ref()
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter(|account| account.provider == "microsoft")
+        .filter_map(|account| {
+            let email = valid_email(account)?;
+            accounts.push(Account {
+                id: account.id,
+                email: email.to_owned(),
+                username: email.to_owned(),
+                imap_host: String::new(),
+                imap_port: 0,
+                smtp_host: String::new(),
+                smtp_port: 0,
+                smtp_starttls: false,
+                online: true,
+                microsoft_graph: true,
+            });
+            Some(account.id)
+        })
+        .collect();
 
-    for (account, settings) in client.list_mail_accounts().await.map_err(Error::from)? {
-        let email = account.email_or_identity();
-        if email.chars().any(char::is_control) || email.parse::<Address>().is_err() {
-            continue;
+    match mail {
+        Ok(mail) => {
+            for (account, settings) in mail {
+                if graph_ids.contains(&account.id) {
+                    continue;
+                }
+                let Some(email) = valid_email(&account) else {
+                    continue;
+                };
+                let smtp_starttls = settings.smtp_starttls();
+                accounts.push(Account {
+                    id: account.id,
+                    email: email.to_owned(),
+                    username: email.to_owned(),
+                    imap_host: settings.imap_host,
+                    imap_port: settings.imap_port,
+                    smtp_host: settings.smtp_host,
+                    smtp_port: settings.smtp_port,
+                    smtp_starttls,
+                    online: true,
+                    microsoft_graph: false,
+                });
+            }
         }
-        let smtp_starttls = settings.smtp_starttls();
-        accounts.push(Account {
-            id: account.id,
-            email: email.to_owned(),
-            username: email.to_owned(),
-            imap_host: settings.imap_host,
-            imap_port: settings.imap_port,
-            smtp_host: settings.smtp_host,
-            smtp_port: settings.smtp_port,
-            smtp_starttls,
-            online: true,
-        });
+        Err(error) if accounts.is_empty() => return Err(Error::from(error)),
+        Err(_) => {}
     }
 
     accounts.sort_by(|a, b| a.email.cmp(&b.email));
     Ok(accounts)
 }
 
+fn valid_email(account: &accounts::models::Account) -> Option<&str> {
+    let email = account.email_or_identity();
+    (!email.chars().any(char::is_control) && email.parse::<Address>().is_ok()).then_some(email)
+}
+
 /// IDs of broker accounts whose Email service is currently usable.
 pub(crate) async fn enabled_ids() -> Result<Vec<Uuid>, Error> {
-    let client = AccountsClient::connect().await.map_err(Error::from)?;
-    Ok(client
-        .list_mail_accounts()
-        .await
-        .map_err(Error::from)?
+    Ok(available()
+        .await?
         .into_iter()
-        .map(|(account, _)| account.id)
+        .map(|account| account.id)
         .collect())
+}
+
+pub(crate) async fn graph_token(id: Uuid, refresh: bool) -> Result<Password, Error> {
+    let client = AccountsClient::connect().await.map_err(Error::from)?;
+    // This is the provider's primary OAuth token. The IMAP/SMTP credential
+    // API returns an Exchange token for Microsoft and must not be used here.
+    let (token, _) = client
+        .access_token(&id, &Service::Email, refresh)
+        .await
+        .map_err(Error::from)?;
+    Ok(Password(token))
 }
 
 /// Watches the broker's global account enable/disable signal.

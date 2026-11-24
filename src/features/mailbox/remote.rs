@@ -179,6 +179,13 @@ async fn sync(
     prefetch: bool,
     stream_headers: bool,
 ) -> Result<Snapshot, Error> {
+    if account.microsoft_graph {
+        let _permit = SYNC_SLOTS
+            .acquire()
+            .await
+            .expect("mail sync semaphore stays open");
+        return super::graph::sync(account, folder, downloads, stream_headers).await;
+    }
     let (send, receive) = oneshot::channel();
     let mut worker = tokio::spawn(async move {
         let permit = SYNC_SLOTS
@@ -372,6 +379,7 @@ fn sync_headers(
                     folder: path.clone(),
                     uid_validity,
                     uid,
+                    graph_id: None,
                 },
                 account_email: account.email.clone(),
                 unread: !item.flags().contains(&Flag::Seen),
@@ -621,6 +629,9 @@ pub(super) async fn change(
     id: MailId,
     change: Change,
 ) -> Result<(), Error> {
+    if account.microsoft_graph {
+        return super::graph::change(account, folder, id, change).await;
+    }
     let cache = Cache::for_account(&account);
     accounts::with_imap_session(account, move |session| {
         let cache = cache.as_ref().and_then(|cache| {
@@ -715,6 +726,9 @@ pub(super) async fn change(
 }
 
 pub async fn body(account: Account, id: MailId) -> Result<Arc<[u8]>, Error> {
+    if account.microsoft_graph {
+        return super::graph::body(account, id, MAX_BODY_BYTES).await;
+    }
     let path = Cache::for_account(&account).map(|cache| cache.body_path(&id));
     if let Some(path) = &path
         && let Ok(bytes) = tokio::fs::read(path).await
@@ -848,6 +862,7 @@ mod header_tests {
             smtp_port: 587,
             smtp_starttls: true,
             online: false,
+            microsoft_graph: false,
         };
         let (snapshot, _) = sync_headers(
             &mut session,

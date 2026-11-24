@@ -56,6 +56,8 @@ pub struct MailId {
     pub folder: String,
     pub uid_validity: u32,
     pub uid: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -791,6 +791,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 
 [[package]]
+name = "base64-codec"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d8c21fac036871f0cc54f32f04486210962fea0b2450233906c1b5b957be5262"
+dependencies = [
+ "simd-cpu",
+]
+
+[[package]]
 name = "basic-toml"
 version = "0.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1634,6 +1643,7 @@ dependencies = [
  "i18n-embed-fl",
  "image",
  "imap",
+ "io-msgraph",
  "lettre",
  "libcosmic",
  "lol_html",
@@ -4717,6 +4727,48 @@ dependencies = [
 ]
 
 [[package]]
+name = "io-http"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "80214cd8fd62f9ce721483416c1f4cf1b924c2a11f6fd9151f0d3dfa627856ed"
+dependencies = [
+ "base64-codec",
+ "httparse",
+ "log",
+ "secrecy",
+ "thiserror 2.0.21",
+ "url",
+]
+
+[[package]]
+name = "io-msgraph"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "86a37b9a68d8d65069fe85dda21ec6d3d478504efbb110022150acabe615fdeb"
+dependencies = [
+ "anyhow",
+ "base64-codec",
+ "io-http",
+ "log",
+ "pimalaya-stream",
+ "serde",
+ "serde_json",
+ "url",
+]
+
+[[package]]
+name = "io-proxy"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08d43e8139aa88f8248928a607a60767b93fc4bebf1e1d36ce761554b7397b3c"
+dependencies = [
+ "base64-codec",
+ "log",
+ "secrecy",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "ipc-channel"
 version = "0.23.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6844,6 +6896,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5be167a7af36ee22fe3115051bc51f6e6c7054c9348e28deb4f49bd6f705a315"
 
 [[package]]
+name = "pimalaya-stream"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "696292f67a3d82d113a279435d4cf6088c5cf2632e166662f28b91268d959e4a"
+dependencies = [
+ "anyhow",
+ "io-proxy",
+ "log",
+ "native-tls",
+ "secrecy",
+ "uds_windows",
+ "url",
+]
+
+[[package]]
 name = "pin-project"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8061,6 +8128,15 @@ checksum = "1ec6038023c8517c623e5bf9606b3c54d40bc8296bb6b2986040428dd84deddd"
 dependencies = [
  "rusqlite",
  "sea-query",
+]
+
+[[package]]
+name = "secrecy"
+version = "0.10.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e891af845473308773346dc847b2c23ee78fe442e0472ac50e22a18a93d3ae5a"
+dependencies = [
+ "zeroize",
 ]
 
 [[package]]
@@ -9788,6 +9864,12 @@ name = "simd-adler32"
 version = "0.3.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a219298ac11a56ea9a6d2120044824d6f01aeb034955e7af7bc16858527deea"
+
+[[package]]
+name = "simd-cpu"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d362f934351780e3ec67adf32bcb5bc341f23a393076d17a600a699c0c93b726"
 
 [[package]]
 name = "simd_cesu8"

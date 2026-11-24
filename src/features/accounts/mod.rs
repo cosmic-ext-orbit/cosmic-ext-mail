@@ -14,7 +14,7 @@ use uuid::Uuid;
 pub(super) use connection::{authentication, smtp_transport, with_imap, with_imap_session};
 use model::Form;
 pub use model::{Account, Field, Password};
-pub(crate) use online::{account_toggles, enabled_ids, service_changes};
+pub(crate) use online::{account_toggles, enabled_ids, graph_token, service_changes};
 use store::Store;
 
 #[derive(Clone, Copy, Debug)]
@@ -367,7 +367,11 @@ impl Accounts {
                     self.status = Some(Status::Busy);
                     return Task::perform(
                         async move {
-                            online::mail_access(id, false).await?;
+                            if account.microsoft_graph {
+                                online::graph_token(id, false).await?;
+                            } else {
+                                online::mail_access(id, false).await?;
+                            }
                             store.save(account, false, Password::default()).await
                         },
                         |result| Message::Finished(result.map(Outcome::Saved)),

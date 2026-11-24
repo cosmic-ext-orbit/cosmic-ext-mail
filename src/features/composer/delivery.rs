@@ -17,6 +17,36 @@ pub enum Error {
 }
 
 pub(super) async fn send(store: Store, draft: Draft, account: Account) -> Result<(), Error> {
+    if account.microsoft_graph {
+        use crate::features::mailbox::graph::{GraphError, with_client};
+
+        let id = account.id;
+        let mime = tokio::task::spawn_blocking(move || {
+            build_message(&store, &draft, &account.email, true).map(|message| message.formatted())
+        })
+        .await
+        .map_err(|_| Error::Uncertain)??;
+        return with_client(id, move |client| {
+            client.mail_send_mime(&mime)?;
+            Ok(())
+        })
+        .await
+        .map_err(|error| match error {
+            GraphError::Account(error) => Error::Account(error),
+            error if matches!(error.status(), Some(401 | 403)) => {
+                Error::Account(accounts::Error::OnlineReconnect)
+            }
+            error
+                if error
+                    .status()
+                    .is_some_and(|status| (400..500).contains(&status)) =>
+            {
+                Error::Rejected
+            }
+            _ => Error::Uncertain,
+        });
+    }
+
     let auth = accounts::authentication(&account)
         .await
         .map_err(Error::Account)?;
@@ -40,6 +70,15 @@ fn deliver(transport: &lettre::SmtpTransport, message: &Message) -> Result<(), E
 }
 
 fn build(store: &Store, draft: &Draft, from: &str) -> Result<Message, Error> {
+    build_message(store, draft, from, false)
+}
+
+fn build_message(
+    store: &Store,
+    draft: &Draft,
+    from: &str,
+    mime_delivery: bool,
+) -> Result<Message, Error> {
     let from = from.parse::<Mailbox>().map_err(|_| Error::Message)?;
     let message_id = format!("<{}@{}>", draft.id, from.email.domain());
     let mut builder = Message::builder()
@@ -47,6 +86,10 @@ fn build(store: &Store, draft: &Draft, from: &str) -> Result<Message, Error> {
         .subject(&draft.subject)
         .message_id(Some(message_id))
         .date_now();
+    if mime_delivery {
+        // Graph derives recipients from MIME headers, including Bcc.
+        builder = builder.keep_bcc();
+    }
     if let Some(reply_to) = &draft.reply_to {
         builder = builder
             .in_reply_to(reply_to.clone())
@@ -128,6 +171,11 @@ mod tests {
         assert!(raw.contains("note.txt"));
         assert!(raw.contains("Cc: cc@example.test"));
         assert!(!raw.contains("hidden@example.test"));
+
+        let graph = build_message(&store, restored, "sender@example.test", true).unwrap();
+        let mime = String::from_utf8(graph.formatted()).unwrap();
+        assert!(mime.contains("Bcc: hidden@example.test"));
+        assert!(mime.contains("Content-Disposition: attachment"));
         assert!(
             message
                 .envelope()
@@ -217,6 +265,7 @@ mod tests {
             let (commands, raw) = worker.join().unwrap();
             assert!(commands.contains("RCPT TO:<hidden@example.test>"));
             assert!(!raw.contains("hidden@example.test"));
+
             assert!(raw.contains("Synthetic mail body."));
         }
     }

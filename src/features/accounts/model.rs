@@ -20,6 +20,8 @@ pub struct Account {
     pub smtp_starttls: bool,
     #[serde(default)]
     pub online: bool,
+    #[serde(default)]
+    pub microsoft_graph: bool,
 }
 
 #[derive(Clone, Default)]
@@ -113,6 +115,7 @@ impl Form {
             smtp_port: settings.smtp_port,
             smtp_starttls: settings.smtp_starttls,
             online: false,
+            microsoft_graph: false,
         })
     }
 }

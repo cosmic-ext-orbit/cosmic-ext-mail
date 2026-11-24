@@ -2,6 +2,7 @@
 
 mod actions;
 mod cache;
+pub(crate) mod graph;
 mod list;
 mod model;
 mod notifications;
@@ -639,6 +640,7 @@ mod tests {
                 account: uuid::Uuid::nil(),
                 folder: "INBOX".into(),
                 uid_validity: 1,
+                graph_id: None,
                 uid,
             },
             account_email: String::new(),
