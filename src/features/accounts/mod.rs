@@ -42,6 +42,7 @@ pub enum Error {
     OnlineReconnect,
     OnlineConsentTimeout,
     OnlineAlreadyLinked,
+    OpenAccountSettings,
 }
 
 impl Error {
@@ -72,6 +73,7 @@ impl Error {
             Self::OnlineReconnect => fl!("account-error-online-reconnect"),
             Self::OnlineConsentTimeout => fl!("account-error-online-consent-timeout"),
             Self::OnlineAlreadyLinked => fl!("account-error-online-already-linked"),
+            Self::OpenAccountSettings => fl!("account-error-open-settings"),
         }
     }
 }
@@ -79,8 +81,9 @@ impl Error {
 #[derive(Clone, Debug)]
 pub enum Message {
     Add,
-    DiscoverOnline,
-    LinkOnline(Uuid),
+    Discover,
+    Discovered(Result<Vec<Account>, Error>),
+    Link(Uuid),
     Edit(Uuid),
     Change(Field, String),
     PasswordChanged(Password),
@@ -96,7 +99,7 @@ pub enum Message {
 #[derive(Clone, Debug)]
 pub enum Outcome {
     Checked,
-    OnlineAccounts(Vec<Account>),
+    OpenedAccountSettings,
     Saved(Vec<Account>),
     Removed(Vec<Account>),
 }
@@ -104,7 +107,6 @@ pub enum Outcome {
 enum Screen {
     List,
     Edit(Form),
-    Online(Vec<Account>),
     ConfirmRemove(Uuid),
 }
 
@@ -132,6 +134,9 @@ impl Status {
 pub struct Accounts {
     store: Result<Store, Error>,
     accounts: Vec<Account>,
+    available: Vec<Account>,
+    discovering: bool,
+    discovery_error: Option<Error>,
     screen: Screen,
     status: Option<Status>,
 }
@@ -145,6 +150,9 @@ impl Accounts {
         Self {
             store,
             accounts,
+            available: Vec::new(),
+            discovering: false,
+            discovery_error: None,
             screen: Screen::List,
             status: None,
         }
@@ -155,8 +163,8 @@ impl Accounts {
         Ok(&self.accounts)
     }
 
-    pub fn is_adding(&self) -> bool {
-        matches!(&self.screen, Screen::Edit(form) if form.id.is_none())
+    pub fn is_editing(&self) -> bool {
+        matches!(self.screen, Screen::Edit(_))
     }
 
     fn is_busy(&self) -> bool {
@@ -164,28 +172,47 @@ impl Accounts {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
-        if let Message::Finished(result) = message {
-            self.status = Some(match result {
-                Ok(Outcome::Checked) => Status::Checked,
-                Ok(Outcome::OnlineAccounts(accounts)) => {
-                    self.screen = Screen::Online(accounts);
-                    self.status = None;
+        match message {
+            Message::Discover => {
+                if self.discovering {
                     return Task::none();
                 }
-                Ok(Outcome::Saved(accounts)) => {
-                    self.accounts = accounts;
-                    self.screen = Screen::List;
-                    Status::Saved
+                self.discovering = true;
+                self.discovery_error = None;
+                return Task::perform(online::available(), Message::Discovered);
+            }
+            Message::Discovered(result) => {
+                self.discovering = false;
+                match result {
+                    Ok(accounts) => self.available = accounts,
+                    Err(error) => {
+                        self.available.clear();
+                        self.discovery_error = Some(error);
+                    }
                 }
-                Ok(Outcome::Removed(accounts)) => {
-                    self.accounts = accounts;
-                    self.screen = Screen::List;
-                    Status::Removed
-                }
-                Err(error) => Status::Error(error),
-            });
-            return Task::none();
+                return Task::none();
+            }
+            Message::Finished(result) => {
+                self.status = match result {
+                    Ok(Outcome::OpenedAccountSettings) => None,
+                    Ok(Outcome::Checked) => Some(Status::Checked),
+                    Ok(Outcome::Saved(accounts)) => {
+                        self.accounts = accounts;
+                        self.screen = Screen::List;
+                        Some(Status::Saved)
+                    }
+                    Ok(Outcome::Removed(accounts)) => {
+                        self.accounts = accounts;
+                        self.screen = Screen::List;
+                        Some(Status::Removed)
+                    }
+                    Err(error) => Some(Status::Error(error)),
+                };
+                return Task::none();
+            }
+            _ => {}
         }
+
         if self.is_busy() {
             return Task::none();
         }
@@ -201,22 +228,29 @@ impl Accounts {
                 }
                 self.screen = Screen::List;
             }
-            Message::Add => self.screen = Screen::Edit(Form::default()),
-            Message::DiscoverOnline => {
-                self.screen = Screen::Online(Vec::new());
+            Message::Add => {
+                self.screen = Screen::List;
                 self.status = Some(Status::Busy);
-                return Task::perform(online::available(), |result| {
-                    Message::Finished(result.map(Outcome::OnlineAccounts))
-                });
+                return Task::perform(
+                    async {
+                        tokio::process::Command::new("accounts_ui")
+                            .arg("--add-account")
+                            .spawn()
+                            .map(|_| Outcome::OpenedAccountSettings)
+                            .map_err(|_| Error::OpenAccountSettings)
+                    },
+                    Message::Finished,
+                );
             }
-            Message::LinkOnline(id) => {
-                let Screen::Online(available) = &self.screen else {
-                    return Task::none();
-                };
+            Message::Link(id) => {
                 if self.accounts.iter().any(|account| account.id == id) {
                     return self.show_error(Error::OnlineAlreadyLinked);
                 }
-                let Some(account) = available.iter().find(|account| account.id == id).cloned()
+                let Some(account) = self
+                    .available
+                    .iter()
+                    .find(|account| account.id == id)
+                    .cloned()
                 else {
                     return Task::none();
                 };
@@ -275,7 +309,7 @@ impl Accounts {
                     Message::Finished(result.map(Outcome::Removed))
                 });
             }
-            Message::Finished(_) => unreachable!(),
+            Message::Discover | Message::Discovered(_) | Message::Finished(_) => unreachable!(),
         }
         Task::none()
     }
@@ -289,7 +323,6 @@ impl Accounts {
             Err(error) => return self.show_error(error),
         };
         let password = form.password.clone();
-        let editing = form.id.is_some();
         if save {
             let store = match &self.store {
                 Ok(store) => store.clone(),
@@ -297,7 +330,7 @@ impl Accounts {
             };
             self.status = Some(Status::Busy);
             Task::perform(
-                async move { store.save(account, editing, password).await },
+                async move { store.save(account, true, password).await },
                 |result| Message::Finished(result.map(Outcome::Saved)),
             )
         } else {

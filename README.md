@@ -20,15 +20,15 @@ A [justfile](./justfile) is included by default for the [casey/just][just] comma
 - `just check` runs clippy on the project to check for linter warnings
 - `just check-json` can be used by IDEs that support LSP
 
-## COSMIC Accounts
+## Mail accounts
 
-Add a Google account or choose **Custom IMAP/SMTP** in COSMIC Accounts, and keep **Email** enabled.
-In Mail, choose **Add account → Use COSMIC Accounts**, select the account, and approve
-Mail access. Mail requests validated server settings and access tokens from the Accounts
-broker for IMAP and SMTP. For custom accounts, the broker supplies the saved login and password after consent. Use an up-to-date Accounts daemon. You can
-unlink the account from Mail while keeping it available to your other apps.
+Open **Settings → Mail accounts** to see accounts that are available to link. Select **Link**
+and approve Mail access. **Add account** opens the Accounts app, where you can add Google or
+custom IMAP/SMTP and enable **Email**. Return to Mail to link the new account.
 
-You can also add an IMAP/SMTP account with a password or app password.
+Mail requests server settings and credentials when it connects. Unlinking an account from Mail
+keeps it available to your other apps. Existing accounts configured directly in Mail can still
+be edited or removed in Mail.
 
 ## Background mail
 

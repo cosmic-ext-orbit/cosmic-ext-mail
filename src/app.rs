@@ -74,6 +74,7 @@ pub enum Message {
     ExitRequested,
     CloseWindow,
     WindowOpened,
+    WindowFocused(window::Id),
     WindowClosed(window::Id),
     CheckInbox,
     InboxChecked(bool),
@@ -304,10 +305,17 @@ impl cosmic::Application for AppModel {
             cosmic::iced::time::every(std::time::Duration::from_secs(60))
                 .map(|_| Message::CheckInbox),
             cosmic::iced::window::close_requests().map(Message::WindowCloseRequested),
+            cosmic::iced::event::listen_with(|event, _, id| {
+                matches!(event, cosmic::iced::Event::Window(window::Event::Focused))
+                    .then_some(Message::WindowFocused(id))
+            }),
             self.reader.subscription().map(Message::Reader),
             shortcuts::subscription(
                 self.core.main_window_id(),
-                if self.accounts.is_adding() {
+                if self.core.window.show_context
+                    && self.context_page == ContextPage::Settings
+                    && self.accounts.is_editing()
+                {
                     shortcuts::Scope::Account
                 } else if self.composer.is_open() {
                     shortcuts::Scope::Composer
@@ -324,7 +332,7 @@ impl cosmic::Application for AppModel {
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Accounts(message) => {
-                let was_adding = self.accounts.is_adding();
+                let add = matches!(&message, accounts::Message::Add);
                 let reload = matches!(
                     &message,
                     accounts::Message::Finished(Ok(
@@ -335,10 +343,13 @@ impl cosmic::Application for AppModel {
                     .accounts
                     .update(message)
                     .map(|message| Message::Accounts(message).into());
-                let adding = self.accounts.is_adding();
-                if was_adding != adding {
+                if add {
                     self.context_page = ContextPage::Settings;
-                    self.set_show_context(!adding);
+                    self.set_show_context(true);
+                    return Task::batch([
+                        update,
+                        self.update(Message::Accounts(accounts::Message::Discover)),
+                    ]);
                 }
                 return if reload {
                     Task::batch([update, self.reload_mail()])
@@ -406,12 +417,20 @@ impl cosmic::Application for AppModel {
             }
             Message::ResizePanes(event) => self.panes.resize(event.split, event.ratio),
             Message::ToggleContextPage(page) => {
-                if self.accounts.is_adding() {
-                    return Task::none();
-                }
                 let show = self.context_page != page || !self.core.window.show_context;
                 self.context_page = page;
                 self.set_show_context(show);
+                if show && page == ContextPage::Settings {
+                    return self.update(Message::Accounts(accounts::Message::Discover));
+                }
+            }
+            Message::WindowFocused(id) => {
+                if self.core.main_window_is(id)
+                    && self.core.window.show_context
+                    && self.context_page == ContextPage::Settings
+                {
+                    return self.update(Message::Accounts(accounts::Message::Discover));
+                }
             }
             Message::CloseContext => self.set_show_context(false),
             Message::WindowCloseRequested(id) => {
@@ -663,7 +682,10 @@ impl cosmic::Application for AppModel {
         if self.permanent_delete.take().is_some() {
             return Task::none();
         }
-        if self.accounts.is_adding() {
+        if self.core.window.show_context
+            && self.context_page == ContextPage::Settings
+            && self.accounts.is_editing()
+        {
             return self.update(Message::Accounts(accounts::Message::Back));
         }
         if self.composer.is_open() {
@@ -692,9 +714,6 @@ impl cosmic::Application for AppModel {
                     )
                     .into(),
             );
-        }
-        if let Some(dialog) = self.accounts.add_dialog() {
-            return Some(dialog.map(Message::Accounts));
         }
         self.composer
             .dialog(self.accounts.saved().unwrap_or_default())

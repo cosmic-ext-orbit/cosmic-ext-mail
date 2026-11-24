@@ -42,7 +42,7 @@ pub enum Field {
 }
 
 pub(super) struct Form {
-    pub(super) id: Option<Uuid>,
+    id: Uuid,
     pub(super) email: String,
     pub(super) username: String,
     pub(super) imap_host: String,
@@ -53,26 +53,10 @@ pub(super) struct Form {
     pub(super) password: Password,
 }
 
-impl Default for Form {
-    fn default() -> Self {
-        Self {
-            id: None,
-            email: String::new(),
-            username: String::new(),
-            imap_host: String::new(),
-            imap_port: "993".into(),
-            smtp_host: String::new(),
-            smtp_port: "587".into(),
-            smtp_starttls: true,
-            password: Password::default(),
-        }
-    }
-}
-
 impl Form {
     pub(super) fn edit(account: &Account) -> Self {
         Self {
-            id: Some(account.id),
+            id: account.id,
             email: account.email.clone(),
             username: account.username.clone(),
             imap_host: account.imap_host.clone(),
@@ -102,14 +86,11 @@ impl Form {
         if username.contains(['\r', '\n', '\0']) {
             return Err(Error::Username);
         }
-        if self.id.is_none() && self.password.0.is_empty() {
-            return Err(Error::Password);
-        }
         if self.password.0.contains(['\r', '\n', '\0']) {
             return Err(Error::Password);
         }
         Ok(Account {
-            id: self.id.unwrap_or_else(Uuid::new_v4),
+            id: self.id,
             email: email.to_owned(),
             username: if username.is_empty() { email } else { username }.to_owned(),
             imap_host: host(&self.imap_host).ok_or(Error::ImapSettings)?,
