@@ -57,6 +57,7 @@ impl Store {
             return Err(Error::AccountMissing);
         }
         match existing {
+            Some(_) if account.online => return Err(Error::OnlineAlreadyLinked),
             Some(saved) => *saved = account.clone(),
             None => accounts.push(account.clone()),
         }
@@ -82,7 +83,12 @@ impl Store {
     pub(super) async fn remove(&self, id: Uuid) -> Result<Vec<Account>, Error> {
         let _lock = self.lock()?;
         let mut accounts = self.load()?;
-        if !accounts.iter().any(|account| account.id == id) {
+        let Some(account) = accounts.iter().find(|account| account.id == id) else {
+            return Ok(accounts);
+        };
+        if account.online {
+            accounts.retain(|account| account.id != id);
+            self.write(&accounts)?;
             return Ok(accounts);
         }
         let service = connect().await?;

@@ -2,6 +2,7 @@
 
 mod connection;
 mod model;
+mod online;
 mod store;
 mod view;
 
@@ -9,11 +10,10 @@ use crate::fl;
 use cosmic::Task;
 use uuid::Uuid;
 
-pub(super) use connection::{smtp_transport, with_imap, with_imap_session};
+pub(super) use connection::{authentication, smtp_transport, with_imap, with_imap_session};
 use model::Form;
 pub use model::{Account, Field, Password};
 use store::Store;
-pub(super) use store::stored_password;
 
 #[derive(Clone, Copy, Debug)]
 pub enum Error {
@@ -34,6 +34,12 @@ pub enum Error {
     SmtpConnect,
     ConnectionTask,
     ConnectionTimeout,
+    OnlineUnavailable,
+    OnlineDisabled,
+    OnlineDenied,
+    OnlineReconnect,
+    OnlineConsentTimeout,
+    OnlineAlreadyLinked,
 }
 
 impl Error {
@@ -56,6 +62,12 @@ impl Error {
             Self::SmtpConnect => fl!("account-error-smtp-connect"),
             Self::ConnectionTask => fl!("account-error-connection-task"),
             Self::ConnectionTimeout => fl!("account-error-connection-timeout"),
+            Self::OnlineUnavailable => fl!("account-error-online-unavailable"),
+            Self::OnlineDisabled => fl!("account-error-online-disabled"),
+            Self::OnlineDenied => fl!("account-error-online-denied"),
+            Self::OnlineReconnect => fl!("account-error-online-reconnect"),
+            Self::OnlineConsentTimeout => fl!("account-error-online-consent-timeout"),
+            Self::OnlineAlreadyLinked => fl!("account-error-online-already-linked"),
         }
     }
 }
@@ -63,6 +75,8 @@ impl Error {
 #[derive(Clone, Debug)]
 pub enum Message {
     Add,
+    DiscoverOnline,
+    LinkOnline(Uuid),
     Edit(Uuid),
     Change(Field, String),
     PasswordChanged(Password),
@@ -78,6 +92,7 @@ pub enum Message {
 #[derive(Clone, Debug)]
 pub enum Outcome {
     Checked,
+    OnlineAccounts(Vec<Account>),
     Saved(Vec<Account>),
     Removed(Vec<Account>),
 }
@@ -85,6 +100,7 @@ pub enum Outcome {
 enum Screen {
     List,
     Edit(Form),
+    Online(Vec<Account>),
     ConfirmRemove(Uuid),
 }
 
@@ -147,6 +163,11 @@ impl Accounts {
         if let Message::Finished(result) = message {
             self.status = Some(match result {
                 Ok(Outcome::Checked) => Status::Checked,
+                Ok(Outcome::OnlineAccounts(accounts)) => {
+                    self.screen = Screen::Online(accounts);
+                    self.status = None;
+                    return Task::none();
+                }
                 Ok(Outcome::Saved(accounts)) => {
                     self.accounts = accounts;
                     self.screen = Screen::List;
@@ -177,8 +198,43 @@ impl Accounts {
                 self.screen = Screen::List;
             }
             Message::Add => self.screen = Screen::Edit(Form::default()),
+            Message::DiscoverOnline => {
+                self.screen = Screen::Online(Vec::new());
+                self.status = Some(Status::Busy);
+                return Task::perform(online::available(), |result| {
+                    Message::Finished(result.map(Outcome::OnlineAccounts))
+                });
+            }
+            Message::LinkOnline(id) => {
+                let Screen::Online(available) = &self.screen else {
+                    return Task::none();
+                };
+                if self.accounts.iter().any(|account| account.id == id) {
+                    return self.show_error(Error::OnlineAlreadyLinked);
+                }
+                let Some(account) = available.iter().find(|account| account.id == id).cloned()
+                else {
+                    return Task::none();
+                };
+                let store = match &self.store {
+                    Ok(store) => store.clone(),
+                    Err(error) => return self.show_error(*error),
+                };
+                self.status = Some(Status::Busy);
+                return Task::perform(
+                    async move {
+                        online::token(id, false).await?;
+                        store.save(account, false, Password::default()).await
+                    },
+                    |result| Message::Finished(result.map(Outcome::Saved)),
+                );
+            }
             Message::Edit(id) => {
-                if let Some(account) = self.accounts.iter().find(|account| account.id == id) {
+                if let Some(account) = self
+                    .accounts
+                    .iter()
+                    .find(|account| account.id == id && !account.online)
+                {
                     self.screen = Screen::Edit(Form::edit(account));
                 }
             }

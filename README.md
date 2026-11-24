@@ -20,6 +20,15 @@ A [justfile](./justfile) is included by default for the [casey/just][just] comma
 - `just check` runs clippy on the project to check for linter warnings
 - `just check-json` can be used by IDEs that support LSP
 
+## COSMIC Accounts
+
+To use Gmail, add your Google account in COSMIC Accounts and keep **Email** enabled.
+In Mail, choose **Add account → Use COSMIC Accounts**, select the account, and approve
+Mail access. Mail requests access tokens from Accounts for IMAP and SMTP. You can
+unlink the account from Mail while keeping it available to your other apps.
+
+You can also add an IMAP/SMTP account with a password or app password.
+
 ## Background mail
 
 After you open Mail, it checks for new Inbox messages even when its window is

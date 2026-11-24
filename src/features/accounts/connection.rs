@@ -1,25 +1,51 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-use lettre::{SmtpTransport, transport::smtp::authentication::Credentials};
+use lettre::{
+    SmtpTransport,
+    transport::smtp::authentication::{Credentials, Mechanism},
+};
 use native_tls::TlsConnector;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
-use super::{Account, Error, Password, store};
+use super::{Account, Error, Password, online, store};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 type Session = imap::Session<native_tls::TlsStream<TcpStream>>;
 
-pub(super) async fn check(account: Account, password: Password) -> Result<(), Error> {
-    let password = if password.0.is_empty() {
-        store::stored_password(account.id).await?
+pub(in crate::features) enum Authentication {
+    Password(Password),
+    OAuth(Password),
+}
+
+pub(in crate::features) async fn authentication(
+    account: &Account,
+) -> Result<Authentication, Error> {
+    if account.online {
+        online::token(account.id, false)
+            .await
+            .map(Authentication::OAuth)
     } else {
-        password
+        store::stored_password(account.id)
+            .await
+            .map(Authentication::Password)
+    }
+}
+
+pub(super) async fn check(account: Account, password: Password) -> Result<(), Error> {
+    let auth = if password.0.is_empty() {
+        authentication(&account).await?
+    } else {
+        Authentication::Password(password)
     };
     let check = blocking_network(move || {
-        check_imap(&account, &password)?;
-        check_smtp(&account, password)
+        let mut session = login_imap(&account, &auth)?;
+        let _ = session.logout();
+        match smtp_transport(&account, auth)?.test_connection() {
+            Ok(true) => Ok(()),
+            _ => Err(Error::SmtpConnect),
+        }
     });
     tokio::time::timeout(Duration::from_secs(45), check)
         .await
@@ -52,13 +78,20 @@ where
     T: Send + 'static,
     E: From<Error> + Send + 'static,
 {
-    let connect = async {
-        let password = store::stored_password(account.id).await?;
-        blocking_network(move || login_imap(&account, &password)).await
+    let auth = authentication(&account).await?;
+    let mut session = match connect_imap(account.clone(), auth).await {
+        Err(Error::ImapLogin) if account.online => {
+            let auth = Authentication::OAuth(online::token(account.id, true).await?);
+            connect_imap(account, auth).await.map_err(|error| {
+                if matches!(error, Error::ImapLogin) {
+                    Error::OnlineReconnect
+                } else {
+                    error
+                }
+            })?
+        }
+        result => result?,
     };
-    let mut session = tokio::time::timeout(Duration::from_secs(45), connect)
-        .await
-        .map_err(|_| Error::ConnectionTimeout)??;
     blocking_network(move || operation(&mut session)).await
 }
 
@@ -88,14 +121,32 @@ where
     receive.await.map_err(|_| Error::ConnectionTask)?
 }
 
-fn check_imap(account: &Account, password: &Password) -> Result<(), Error> {
-    let mut session = login_imap(account, password)?;
-    let _ = session.logout();
-    Ok(())
+async fn connect_imap(account: Account, auth: Authentication) -> Result<Session, Error> {
+    tokio::time::timeout(
+        Duration::from_secs(45),
+        blocking_network(move || login_imap(&account, &auth)),
+    )
+    .await
+    .map_err(|_| Error::ConnectionTimeout)?
 }
 
-fn login_imap(account: &Account, password: &Password) -> Result<Session, Error> {
-    let mut addresses = (account.imap_host.as_str(), account.imap_port)
+struct Xoauth2(std::cell::Cell<Option<String>>);
+
+impl imap::Authenticator for Xoauth2 {
+    type Response = String;
+
+    fn process(&self, _: &[u8]) -> Self::Response {
+        self.0.take().unwrap_or_default()
+    }
+}
+
+fn login_imap(account: &Account, auth: &Authentication) -> Result<Session, Error> {
+    let (host, port) = if matches!(auth, Authentication::OAuth(_)) {
+        online::IMAP
+    } else {
+        (account.imap_host.as_str(), account.imap_port)
+    };
+    let mut addresses = (host, port)
         .to_socket_addrs()
         .map_err(|_| Error::ImapConnect)?;
     let stream = addresses
@@ -112,43 +163,66 @@ fn login_imap(account: &Account, password: &Password) -> Result<Session, Error> 
         .min_protocol_version(Some(native_tls::Protocol::Tlsv12))
         .build()
         .map_err(|_| Error::ImapConnect)?;
-    let stream = tls
-        .connect(&account.imap_host, stream)
-        .map_err(|_| Error::ImapConnect)?;
+    let stream = tls.connect(host, stream).map_err(|_| Error::ImapConnect)?;
     let mut client = imap::Client::new(stream);
     client.read_greeting().map_err(|_| Error::ImapConnect)?;
-    client
-        .login(&account.username, &password.0)
-        .map_err(|_| Error::ImapLogin)
+    match auth {
+        Authentication::Password(password) => client.login(&account.username, &password.0),
+        Authentication::OAuth(token) => client.authenticate(
+            "XOAUTH2",
+            &Xoauth2(std::cell::Cell::new(Some(format!(
+                "user={}\x01auth=Bearer {}\x01\x01",
+                account.email, token.0
+            )))),
+        ),
+    }
+    .map_err(|_| Error::ImapLogin)
 }
 
 pub(in crate::features) fn smtp_transport(
     account: &Account,
-    password: Password,
+    auth: Authentication,
 ) -> Result<SmtpTransport, Error> {
-    let builder = if account.smtp_starttls {
-        SmtpTransport::starttls_relay(&account.smtp_host)
+    let (builder, port) = if matches!(&auth, Authentication::OAuth(_)) {
+        (
+            SmtpTransport::starttls_relay(online::SMTP.0),
+            online::SMTP.1,
+        )
+    } else if account.smtp_starttls {
+        (
+            SmtpTransport::starttls_relay(&account.smtp_host),
+            account.smtp_port,
+        )
     } else {
-        SmtpTransport::relay(&account.smtp_host)
+        (SmtpTransport::relay(&account.smtp_host), account.smtp_port)
+    };
+    let builder = builder
+        .map_err(|_| Error::SmtpConnect)?
+        .port(port)
+        .timeout(Some(TIMEOUT));
+    Ok(match auth {
+        Authentication::Password(password) => {
+            builder.credentials(Credentials::new(account.username.clone(), password.0))
+        }
+        Authentication::OAuth(token) => builder
+            .authentication(vec![Mechanism::Xoauth2])
+            .credentials(Credentials::new(account.email.clone(), token.0)),
     }
-    .map_err(|_| Error::SmtpConnect)?;
-    Ok(builder
-        .port(account.smtp_port)
-        .timeout(Some(TIMEOUT))
-        .credentials(Credentials::new(account.username.clone(), password.0))
-        .build())
-}
-
-fn check_smtp(account: &Account, password: Password) -> Result<(), Error> {
-    match smtp_transport(account, password)?.test_connection() {
-        Ok(true) => Ok(()),
-        _ => Err(Error::SmtpConnect),
-    }
+    .build())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn xoauth2_sends_the_token_only_once() {
+        use imap::Authenticator;
+
+        let auth = Xoauth2(std::cell::Cell::new(Some("fixture-credentials".into())));
+        assert_eq!(auth.process(b""), "fixture-credentials");
+        assert!(auth.process(b"invalid token").is_empty());
+    }
 
     #[test]
     fn shutting_down_tokio_does_not_wait_for_network_io() {

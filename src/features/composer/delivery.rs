@@ -17,12 +17,12 @@ pub enum Error {
 }
 
 pub(super) async fn send(store: Store, draft: Draft, account: Account) -> Result<(), Error> {
-    let password = accounts::stored_password(account.id)
+    let auth = accounts::authentication(&account)
         .await
         .map_err(Error::Account)?;
     tokio::task::spawn_blocking(move || {
         let message = build(&store, &draft, &account.email)?;
-        let transport = accounts::smtp_transport(&account, password).map_err(Error::Account)?;
+        let transport = accounts::smtp_transport(&account, auth).map_err(Error::Account)?;
         deliver(&transport, &message)
     })
     .await

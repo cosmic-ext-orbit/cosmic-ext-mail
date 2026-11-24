@@ -18,6 +18,8 @@ pub struct Account {
     pub smtp_host: String,
     pub smtp_port: u16,
     pub smtp_starttls: bool,
+    #[serde(default)]
+    pub online: bool,
 }
 
 #[derive(Clone, Default)]
@@ -115,6 +117,7 @@ impl Form {
             smtp_host: host(&self.smtp_host).ok_or(Error::SmtpSettings)?,
             smtp_port: port(&self.smtp_port).ok_or(Error::SmtpSettings)?,
             smtp_starttls: self.smtp_starttls,
+            online: false,
         })
     }
 }

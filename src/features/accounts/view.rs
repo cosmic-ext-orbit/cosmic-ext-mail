@@ -6,12 +6,13 @@ use uuid::Uuid;
 
 use crate::fl;
 
-use super::{Accounts, Field, Form, Message, Password, Screen, Status};
+use super::{Account, Accounts, Field, Form, Message, Password, Screen, Status};
 
 impl Accounts {
     pub fn view(&self) -> Element<'_, Message> {
         match &self.screen {
             Screen::List => self.list(),
+            Screen::Online(available) => self.online_accounts(available),
             Screen::Edit(form) if form.id.is_some() => self.edit(form),
             Screen::Edit(_) => self.list(),
             Screen::ConfirmRemove(id) => self.confirm(*id),
@@ -31,7 +32,15 @@ impl Accounts {
                 .title(fl!("account-add"))
                 .width(Length::Fill)
                 .max_width(520)
-                .control(widget::scrollable(self.fields(form)).height(Length::Shrink))
+                .control(
+                    widget::column::with_capacity(2)
+                        .push(
+                            widget::button::text(fl!("account-use-online"))
+                                .on_press_maybe(editable.then_some(Message::DiscoverOnline)),
+                        )
+                        .push(widget::scrollable(self.fields(form)).height(Length::Shrink))
+                        .spacing(8),
+                )
                 .tertiary_action(
                     widget::button::text(fl!("account-check"))
                         .on_press_maybe(editable.then_some(Message::Check)),
@@ -54,21 +63,29 @@ impl Accounts {
             rows = rows.push(widget::text::body(fl!("account-empty")));
         }
         for account in &self.accounts {
+            let row = widget::row::with_capacity(3)
+                .push(widget::text::body(account.email.as_str()).width(Length::Fill));
+            let row = if account.online {
+                row.push(widget::text::caption(fl!("account-online-source")))
+            } else {
+                row.push(
+                    widget::button::icon(widget::icon::from_name("edit-symbolic"))
+                        .tooltip(fl!("account-edit"))
+                        .on_press(Message::Edit(account.id)),
+                )
+            };
             rows = rows.push(
-                widget::row::with_capacity(3)
-                    .push(widget::text::body(account.email.as_str()).width(Length::Fill))
-                    .push(
-                        widget::button::icon(widget::icon::from_name("edit-symbolic"))
-                            .tooltip(fl!("account-edit"))
-                            .on_press(Message::Edit(account.id)),
-                    )
-                    .push(
-                        widget::button::icon(widget::icon::from_name("user-trash-symbolic"))
-                            .tooltip(fl!("account-remove"))
-                            .on_press(Message::ConfirmRemove(account.id)),
-                    )
-                    .spacing(4)
-                    .align_y(cosmic::iced::Alignment::Center),
+                row.push(
+                    widget::button::icon(widget::icon::from_name("user-trash-symbolic"))
+                        .tooltip(if account.online {
+                            fl!("account-unlink")
+                        } else {
+                            fl!("account-remove")
+                        })
+                        .on_press(Message::ConfirmRemove(account.id)),
+                )
+                .spacing(4)
+                .align_y(cosmic::iced::Alignment::Center),
             );
         }
 
@@ -76,8 +93,52 @@ impl Accounts {
             .title(fl!("accounts"))
             .add(rows.push(self.status_text()))
             .add(
-                widget::button::suggested(fl!("account-add"))
-                    .on_press_maybe(self.store.is_ok().then_some(Message::Add)),
+                widget::row::with_children([
+                    widget::button::suggested(fl!("account-add"))
+                        .on_press_maybe(self.store.is_ok().then_some(Message::Add))
+                        .into(),
+                    widget::button::text(fl!("account-use-online"))
+                        .on_press_maybe(self.store.is_ok().then_some(Message::DiscoverOnline))
+                        .into(),
+                ])
+                .spacing(8)
+                .wrap(),
+            )
+            .into()
+    }
+
+    fn online_accounts<'a>(&'a self, available: &'a [Account]) -> Element<'a, Message> {
+        let mut section = widget::settings::section().title(fl!("account-online-source"));
+        let mut any = false;
+        for account in available {
+            if self.accounts.iter().any(|saved| saved.id == account.id) {
+                continue;
+            }
+            any = true;
+            section = section.add(
+                widget::settings::item::builder(account.email.as_str()).control(
+                    widget::button::standard(fl!("account-link")).on_press_maybe(
+                        (!self.is_busy()).then_some(Message::LinkOnline(account.id)),
+                    ),
+                ),
+            );
+        }
+        if !any && self.status.is_none() {
+            section = section.add(widget::text::body(fl!("account-online-empty")));
+        }
+        section
+            .add(self.status_text())
+            .add(
+                widget::row::with_children([
+                    widget::button::standard(fl!("account-back"))
+                        .on_press_maybe((!self.is_busy()).then_some(Message::Back))
+                        .into(),
+                    widget::button::text(fl!("account-online-refresh"))
+                        .on_press_maybe((!self.is_busy()).then_some(Message::DiscoverOnline))
+                        .into(),
+                ])
+                .spacing(8)
+                .wrap(),
             )
             .into()
     }
@@ -162,25 +223,30 @@ impl Accounts {
     }
 
     fn confirm(&self, id: Uuid) -> Element<'_, Message> {
-        let email = self
-            .accounts
-            .iter()
-            .find(|account| account.id == id)
-            .map_or("", |account| account.email.as_str());
+        let account = self.accounts.iter().find(|account| account.id == id);
+        let email = account.map_or("", |account| account.email.as_str());
+        let online = account.is_some_and(|account| account.online);
+        let title = if online {
+            fl!("account-unlink")
+        } else {
+            fl!("account-remove")
+        };
+        let confirmation = if online {
+            fl!("account-unlink-confirm", email = email)
+        } else {
+            fl!("account-remove-confirm", email = email)
+        };
         let editable = !self.is_busy();
         widget::settings::section()
-            .title(fl!("account-remove"))
-            .add(widget::text::body(fl!(
-                "account-remove-confirm",
-                email = email
-            )))
+            .title(title.clone())
+            .add(widget::text::body(confirmation))
             .add(self.status_text())
             .add(
                 widget::row::with_children([
                     widget::button::standard(fl!("account-back"))
                         .on_press_maybe(editable.then_some(Message::Back))
                         .into(),
-                    widget::button::destructive(fl!("account-remove"))
+                    widget::button::destructive(title)
                         .on_press_maybe(editable.then_some(Message::Remove(id)))
                         .into(),
                 ])
