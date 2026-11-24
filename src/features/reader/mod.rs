@@ -93,9 +93,9 @@ impl Reader {
         let Some(mail) = mail else {
             return Task::none();
         };
-        let Some(account) = accounts.saved().ok().and_then(|accounts| {
+        let Some(account) = accounts.usable().ok().and_then(|accounts| {
             accounts
-                .iter()
+                .into_iter()
                 .find(|account| account.id == mail.id.account)
         }) else {
             self.body = Body::Failed(remote::Error::MessageUnavailable.text());

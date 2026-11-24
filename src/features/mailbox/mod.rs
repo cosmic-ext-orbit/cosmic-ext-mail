@@ -245,7 +245,7 @@ impl Mailbox {
         self.syncing = false;
         self.downloads = Downloads::default();
         self.headers = Downloads::default();
-        let saved = match accounts.saved() {
+        let saved = match accounts.usable() {
             Ok([]) => {
                 self.status = Status::NoAccounts;
                 return cosmic::Task::none();

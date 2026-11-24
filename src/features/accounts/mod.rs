@@ -8,11 +8,13 @@ mod view;
 
 use crate::fl;
 use cosmic::Task;
+use std::collections::HashSet;
 use uuid::Uuid;
 
 pub(super) use connection::{authentication, smtp_transport, with_imap, with_imap_session};
 use model::Form;
 pub use model::{Account, Field, Password};
+pub(crate) use online::{account_toggles, enabled_ids, service_changes};
 use store::Store;
 
 #[derive(Clone, Copy, Debug)]
@@ -98,7 +100,7 @@ pub enum Message {
     Add,
     Discover,
     Discovered(Result<Vec<Account>, Error>),
-    Link(Uuid),
+    ToggleLink(Uuid, bool),
     Edit(Uuid),
     Change(Field, String),
     PasswordChanged(Password),
@@ -116,6 +118,7 @@ pub enum Outcome {
     Checked,
     OpenedAccountSettings,
     Saved(Vec<Account>),
+    Disabled(Vec<Account>),
     Removed(Vec<Account>),
 }
 
@@ -130,6 +133,7 @@ enum Status {
     Busy,
     Checked,
     Saved,
+    Disabled,
     Removed,
     Error(Error),
 }
@@ -140,6 +144,7 @@ impl Status {
             Self::Busy => fl!("account-working"),
             Self::Checked => fl!("account-check-success"),
             Self::Saved => fl!("account-save-success"),
+            Self::Disabled => fl!("account-disable-success"),
             Self::Removed => fl!("account-remove-success"),
             Self::Error(error) => error.text(),
         }
@@ -149,7 +154,13 @@ impl Status {
 pub struct Accounts {
     store: Result<Store, Error>,
     accounts: Vec<Account>,
+    active: Vec<Account>,
     available: Vec<Account>,
+    /// Account IDs whose Email service is currently usable in the broker.
+    ///
+    /// `None` means the broker has not been queried yet, so saved online
+    /// accounts stay hidden until the first successful check.
+    usable_online: Option<HashSet<Uuid>>,
     discovering: bool,
     discovery_error: Option<Error>,
     screen: Screen,
@@ -164,8 +175,14 @@ impl Accounts {
         };
         Self {
             store,
+            active: accounts
+                .iter()
+                .filter(|account| !account.online)
+                .cloned()
+                .collect(),
             accounts,
             available: Vec::new(),
+            usable_online: None,
             discovering: false,
             discovery_error: None,
             screen: Screen::List,
@@ -176,6 +193,72 @@ impl Accounts {
     pub fn saved(&self) -> Result<&[Account], Error> {
         self.store.as_ref().map_err(|error| *error)?;
         Ok(&self.accounts)
+    }
+
+    /// Accounts Mail may actually use for mail traffic.
+    ///
+    /// Local accounts are always usable. Online accounts are hidden until the
+    /// broker confirms their Email service is enabled.
+    pub fn usable(&self) -> Result<&[Account], Error> {
+        self.store.as_ref().map_err(|error| *error)?;
+        Ok(&self.active)
+    }
+
+    pub fn usable_vec(&self) -> Vec<Account> {
+        self.usable().unwrap_or_default().to_vec()
+    }
+
+    pub fn usable_ids(&self) -> Vec<Uuid> {
+        self.usable()
+            .unwrap_or_default()
+            .iter()
+            .map(|account| account.id)
+            .collect()
+    }
+
+    pub fn online_ids(&self) -> Vec<Uuid> {
+        self.saved()
+            .unwrap_or_default()
+            .iter()
+            .filter(|account| account.online)
+            .map(|account| account.id)
+            .collect()
+    }
+
+    /// Replaces the set of online accounts known to be usable.
+    pub fn set_usable_online(&mut self, ids: Vec<Uuid>) {
+        self.usable_online = Some(ids.into_iter().collect());
+        self.recompute_active();
+    }
+
+    pub fn set_online_usable(&mut self, id: Uuid, enabled: bool) {
+        let ids = self.usable_online.get_or_insert_with(HashSet::new);
+        if enabled {
+            ids.insert(id);
+        } else {
+            ids.remove(&id);
+        }
+        self.recompute_active();
+    }
+
+    fn set_accounts(&mut self, accounts: Vec<Account>) {
+        self.accounts = accounts;
+        self.recompute_active();
+    }
+
+    fn recompute_active(&mut self) {
+        self.active = self
+            .accounts
+            .iter()
+            .filter(|account| {
+                !account.online
+                    || self
+                        .usable_online
+                        .as_ref()
+                        .is_some_and(|ids| ids.contains(&account.id))
+            })
+            .cloned()
+            .collect();
     }
 
     pub fn is_editing(&self) -> bool {
@@ -199,7 +282,10 @@ impl Accounts {
             Message::Discovered(result) => {
                 self.discovering = false;
                 match result {
-                    Ok(accounts) => self.available = accounts,
+                    Ok(accounts) => {
+                        self.set_usable_online(accounts.iter().map(|account| account.id).collect());
+                        self.available = accounts;
+                    }
                     Err(error) => {
                         self.available.clear();
                         self.discovery_error = Some(error);
@@ -212,12 +298,17 @@ impl Accounts {
                     Ok(Outcome::OpenedAccountSettings) => None,
                     Ok(Outcome::Checked) => Some(Status::Checked),
                     Ok(Outcome::Saved(accounts)) => {
-                        self.accounts = accounts;
+                        self.set_accounts(accounts);
                         self.screen = Screen::List;
                         Some(Status::Saved)
                     }
+                    Ok(Outcome::Disabled(accounts)) => {
+                        self.set_accounts(accounts);
+                        self.screen = Screen::List;
+                        Some(Status::Disabled)
+                    }
                     Ok(Outcome::Removed(accounts)) => {
-                        self.accounts = accounts;
+                        self.set_accounts(accounts);
                         self.screen = Screen::List;
                         Some(Status::Removed)
                     }
@@ -255,30 +346,50 @@ impl Accounts {
                     Message::Finished,
                 );
             }
-            Message::Link(id) => {
-                if self.accounts.iter().any(|account| account.id == id) {
-                    return self.show_error(Error::OnlineAlreadyLinked);
+            Message::ToggleLink(id, enabled) => {
+                if enabled {
+                    if self.accounts.iter().any(|account| account.id == id) {
+                        return self.show_error(Error::OnlineAlreadyLinked);
+                    }
+                    let Some(account) = self
+                        .available
+                        .iter()
+                        .find(|account| account.id == id)
+                        .cloned()
+                    else {
+                        return Task::none();
+                    };
+                    let store = match &self.store {
+                        Ok(store) => store.clone(),
+                        Err(error) => return self.show_error(*error),
+                    };
+                    self.set_online_usable(id, true);
+                    self.status = Some(Status::Busy);
+                    return Task::perform(
+                        async move {
+                            online::mail_access(id, false).await?;
+                            store.save(account, false, Password::default()).await
+                        },
+                        |result| Message::Finished(result.map(Outcome::Saved)),
+                    );
                 }
-                let Some(account) = self
-                    .available
+
+                if !self
+                    .accounts
                     .iter()
-                    .find(|account| account.id == id)
-                    .cloned()
-                else {
+                    .any(|account| account.id == id && account.online)
+                {
                     return Task::none();
-                };
+                }
                 let store = match &self.store {
                     Ok(store) => store.clone(),
                     Err(error) => return self.show_error(*error),
                 };
+                self.set_online_usable(id, false);
                 self.status = Some(Status::Busy);
-                return Task::perform(
-                    async move {
-                        online::mail_access(id, false).await?;
-                        store.save(account, false, Password::default()).await
-                    },
-                    |result| Message::Finished(result.map(Outcome::Saved)),
-                );
+                return Task::perform(async move { store.remove(id).await }, |result| {
+                    Message::Finished(result.map(Outcome::Disabled))
+                });
             }
             Message::Edit(id) => {
                 if let Some(account) = self
@@ -308,7 +419,16 @@ impl Accounts {
                 }
             }
             Message::Check | Message::Save => return self.submit(matches!(message, Message::Save)),
-            Message::ConfirmRemove(id) => self.screen = Screen::ConfirmRemove(id),
+            Message::ConfirmRemove(id) => {
+                if self
+                    .accounts
+                    .iter()
+                    .any(|account| account.id == id && account.online)
+                {
+                    return Task::none();
+                }
+                self.screen = Screen::ConfirmRemove(id);
+            }
             Message::Remove(id) => {
                 if !matches!(self.screen, Screen::ConfirmRemove(current) if current == id) {
                     return Task::none();

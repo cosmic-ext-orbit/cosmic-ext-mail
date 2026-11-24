@@ -54,6 +54,8 @@ impl menu::Action for MenuAction {
 #[derive(Clone, Debug)]
 pub enum Message {
     Accounts(accounts::Message),
+    AccountsAvailability(Result<Vec<uuid::Uuid>, accounts::Error>),
+    AccountsChanged,
     Search(search::Message),
     Shortcut(shortcuts::Action),
     List(mailbox::Message),
@@ -195,7 +197,10 @@ impl cosmic::Application for AppModel {
         };
         let open = app.open_window();
         let load = app.reload_mail();
-        (app, Task::batch([open, load]))
+        let availability = Task::perform(accounts::enabled_ids(), |result| {
+            Message::AccountsAvailability(result).into()
+        });
+        (app, Task::batch([open, load, availability]))
     }
 
     fn header_start(&self) -> Vec<Element<'_, Message>> {
@@ -299,6 +304,9 @@ impl cosmic::Application for AppModel {
                 });
         Subscription::batch([
             photos,
+            accounts::account_toggles().map(|()| Message::AccountsChanged),
+            accounts::service_changes(self.accounts.online_ids())
+                .map(|()| Message::AccountsChanged),
             self.composer
                 .subscription(self.core.main_window_id())
                 .map(Message::Composer),
@@ -335,9 +343,9 @@ impl cosmic::Application for AppModel {
                 let add = matches!(&message, accounts::Message::Add);
                 let reload = matches!(
                     &message,
-                    accounts::Message::Finished(Ok(
-                        accounts::Outcome::Saved(_) | accounts::Outcome::Removed(_)
-                    ))
+                    accounts::Message::Finished(Ok(accounts::Outcome::Saved(_)
+                        | accounts::Outcome::Disabled(_)
+                        | accounts::Outcome::Removed(_)))
                 );
                 let update = self
                     .accounts
@@ -355,6 +363,25 @@ impl cosmic::Application for AppModel {
                     Task::batch([update, self.reload_mail()])
                 } else {
                     update
+                };
+            }
+            Message::AccountsChanged => {
+                return Task::perform(accounts::enabled_ids(), |result| {
+                    Message::AccountsAvailability(result).into()
+                });
+            }
+            Message::AccountsAvailability(result) => {
+                let before: std::collections::HashSet<_> =
+                    self.accounts.usable_ids().into_iter().collect();
+                if let Ok(ids) = result {
+                    self.accounts.set_usable_online(ids);
+                }
+                let after: std::collections::HashSet<_> =
+                    self.accounts.usable_ids().into_iter().collect();
+                return if before == after {
+                    Task::none()
+                } else {
+                    self.reload_mail()
                 };
             }
             Message::Search(message) => return self.update_search(message),
@@ -412,7 +439,7 @@ impl cosmic::Application for AppModel {
                 }
                 return self
                     .composer
-                    .update(message, self.accounts.saved().unwrap_or_default())
+                    .update(message, &self.accounts.usable().unwrap_or_default())
                     .map(|message| Message::Composer(message).into());
             }
             Message::ResizePanes(event) => self.panes.resize(event.split, event.ratio),
@@ -466,7 +493,14 @@ impl cosmic::Application for AppModel {
                     .map(|message| Message::List(message).into());
                 return Task::batch([title, refresh, self.load_body()]);
             }
-            Message::CheckInbox => return self.check_inbox(),
+            Message::CheckInbox => {
+                return Task::batch([
+                    self.check_inbox(),
+                    Task::perform(accounts::enabled_ids(), |result| {
+                        Message::AccountsAvailability(result).into()
+                    }),
+                ]);
+            }
             Message::InboxChecked(success) => {
                 self.checking_inbox = false;
                 self.inbox_check_failed = !success;
@@ -716,7 +750,7 @@ impl cosmic::Application for AppModel {
             );
         }
         self.composer
-            .dialog(self.accounts.saved().unwrap_or_default())
+            .dialog(&self.accounts.usable().unwrap_or_default())
             .map(|dialog| dialog.map(Message::Composer))
     }
 }
@@ -1044,10 +1078,9 @@ impl AppModel {
             RowAction::Compose(action) => {
                 let Some(account) = self
                     .accounts
-                    .saved()
-                    .ok()
-                    .and_then(|accounts| accounts.iter().find(|account| account.id == id.account))
-                    .cloned()
+                    .usable_vec()
+                    .into_iter()
+                    .find(|account| account.id == id.account)
                 else {
                     return self.mail_action_error(fl!("mail-unavailable"));
                 };
@@ -1177,7 +1210,7 @@ impl AppModel {
                 .poll_inbox(&self.accounts)
                 .map(|message| Message::List(message).into());
         }
-        let Ok(accounts) = self.accounts.saved() else {
+        let Ok(accounts) = self.accounts.usable() else {
             return Task::none();
         };
         if accounts.is_empty() {

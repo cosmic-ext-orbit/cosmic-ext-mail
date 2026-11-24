@@ -23,30 +23,30 @@ impl Accounts {
                 .spacing(10);
         let editable = !self.is_busy();
         for account in &self.accounts {
-            let row = widget::row::with_capacity(3)
+            let mut row = widget::row::with_capacity(3)
                 .push(widget::text::body(account.email.as_str()).width(Length::Fill));
-            let row = if account.online {
-                row
+            if account.online {
+                let available = self.available.iter().any(|online| online.id == account.id);
+                row = row.push(
+                    widget::toggler(true).on_toggle_maybe(
+                        (editable && available && self.store.is_ok())
+                            .then_some(move |_| Message::ToggleLink(account.id, false)),
+                    ),
+                );
             } else {
-                row.push(
-                    widget::button::icon(widget::icon::from_name("edit-symbolic"))
-                        .tooltip(fl!("account-edit"))
-                        .on_press_maybe(editable.then_some(Message::Edit(account.id))),
-                )
-            };
-            rows = rows.push(
-                row.push(
-                    widget::button::icon(widget::icon::from_name("user-trash-symbolic"))
-                        .tooltip(if account.online {
-                            fl!("account-unlink")
-                        } else {
-                            fl!("account-remove")
-                        })
-                        .on_press_maybe(editable.then_some(Message::ConfirmRemove(account.id))),
-                )
-                .spacing(4)
-                .align_y(cosmic::iced::Alignment::Center),
-            );
+                row = row
+                    .push(
+                        widget::button::icon(widget::icon::from_name("edit-symbolic"))
+                            .tooltip(fl!("account-edit"))
+                            .on_press_maybe(editable.then_some(Message::Edit(account.id))),
+                    )
+                    .push(
+                        widget::button::icon(widget::icon::from_name("user-trash-symbolic"))
+                            .tooltip(fl!("account-remove"))
+                            .on_press_maybe(editable.then_some(Message::ConfirmRemove(account.id))),
+                    );
+            }
+            rows = rows.push(row.spacing(4).align_y(cosmic::iced::Alignment::Center));
         }
 
         let mut has_available = false;
@@ -60,9 +60,10 @@ impl Accounts {
                     widget::text::body(account.email.as_str())
                         .width(Length::Fill)
                         .into(),
-                    widget::button::standard(fl!("account-link"))
-                        .on_press_maybe(
-                            (editable && self.store.is_ok()).then_some(Message::Link(account.id)),
+                    widget::toggler(false)
+                        .on_toggle_maybe(
+                            (editable && self.store.is_ok())
+                                .then_some(move |enabled| Message::ToggleLink(account.id, enabled)),
                         )
                         .into(),
                 ])
@@ -88,7 +89,7 @@ impl Accounts {
 
         widget::settings::section()
             .title(fl!("accounts"))
-            .add(rows.push(self.status_text()))
+            .add(rows)
             .add(
                 widget::button::suggested(fl!("account-add"))
                     .on_press_maybe(editable.then_some(Message::Add)),
@@ -174,17 +175,8 @@ impl Accounts {
     fn confirm(&self, id: Uuid) -> Element<'_, Message> {
         let account = self.accounts.iter().find(|account| account.id == id);
         let email = account.map_or("", |account| account.email.as_str());
-        let online = account.is_some_and(|account| account.online);
-        let title = if online {
-            fl!("account-unlink")
-        } else {
-            fl!("account-remove")
-        };
-        let confirmation = if online {
-            fl!("account-unlink-confirm", email = email)
-        } else {
-            fl!("account-remove-confirm", email = email)
-        };
+        let title = fl!("account-remove");
+        let confirmation = fl!("account-remove-confirm", email = email);
         let editable = !self.is_busy();
         widget::settings::section()
             .title(title.clone())

@@ -257,10 +257,9 @@ impl Mailbox {
         change: Change,
     ) -> Task<Message> {
         let account = accounts
-            .saved()
-            .ok()
-            .and_then(|accounts| accounts.iter().find(|account| account.id == id.account))
-            .cloned();
+            .usable_vec()
+            .into_iter()
+            .find(|account| account.id == id.account);
         let Some(account) = account else {
             return Task::done(Message::Changed(
                 folder,
