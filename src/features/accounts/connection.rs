@@ -16,16 +16,15 @@ type Session = imap::Session<native_tls::TlsStream<TcpStream>>;
 
 pub(in crate::features) enum Authentication {
     Password(Password),
-    OAuth(Password),
+    OAuth(online::MailConnectionSettings, Password),
 }
 
 pub(in crate::features) async fn authentication(
     account: &Account,
 ) -> Result<Authentication, Error> {
     if account.online {
-        online::token(account.id, false)
-            .await
-            .map(Authentication::OAuth)
+        let (settings, token) = online::mail_access(account.id, false).await?;
+        Ok(Authentication::OAuth(settings, token))
     } else {
         store::stored_password(account.id)
             .await
@@ -81,7 +80,8 @@ where
     let auth = authentication(&account).await?;
     let mut session = match connect_imap(account.clone(), auth).await {
         Err(Error::ImapLogin) if account.online => {
-            let auth = Authentication::OAuth(online::token(account.id, true).await?);
+            let (settings, token) = online::mail_access(account.id, true).await?;
+            let auth = Authentication::OAuth(settings, token);
             connect_imap(account, auth).await.map_err(|error| {
                 if matches!(error, Error::ImapLogin) {
                     Error::OnlineReconnect
@@ -141,10 +141,9 @@ impl imap::Authenticator for Xoauth2 {
 }
 
 fn login_imap(account: &Account, auth: &Authentication) -> Result<Session, Error> {
-    let (host, port) = if matches!(auth, Authentication::OAuth(_)) {
-        online::IMAP
-    } else {
-        (account.imap_host.as_str(), account.imap_port)
+    let (host, port) = match auth {
+        Authentication::OAuth(settings, _) => (settings.imap_host.as_str(), settings.imap_port),
+        Authentication::Password(_) => (account.imap_host.as_str(), account.imap_port),
     };
     let mut addresses = (host, port)
         .to_socket_addrs()
@@ -168,7 +167,7 @@ fn login_imap(account: &Account, auth: &Authentication) -> Result<Session, Error
     client.read_greeting().map_err(|_| Error::ImapConnect)?;
     match auth {
         Authentication::Password(password) => client.login(&account.username, &password.0),
-        Authentication::OAuth(token) => client.authenticate(
+        Authentication::OAuth(_, token) => client.authenticate(
             "XOAUTH2",
             &Xoauth2(std::cell::Cell::new(Some(format!(
                 "user={}\x01auth=Bearer {}\x01\x01",
@@ -183,18 +182,22 @@ pub(in crate::features) fn smtp_transport(
     account: &Account,
     auth: Authentication,
 ) -> Result<SmtpTransport, Error> {
-    let (builder, port) = if matches!(&auth, Authentication::OAuth(_)) {
-        (
-            SmtpTransport::starttls_relay(online::SMTP.0),
-            online::SMTP.1,
-        )
-    } else if account.smtp_starttls {
-        (
-            SmtpTransport::starttls_relay(&account.smtp_host),
+    let (host, port, starttls) = match &auth {
+        Authentication::OAuth(settings, _) => (
+            settings.smtp_host.as_str(),
+            settings.smtp_port,
+            settings.smtp_starttls(),
+        ),
+        Authentication::Password(_) => (
+            account.smtp_host.as_str(),
             account.smtp_port,
-        )
+            account.smtp_starttls,
+        ),
+    };
+    let builder = if starttls {
+        SmtpTransport::starttls_relay(host)
     } else {
-        (SmtpTransport::relay(&account.smtp_host), account.smtp_port)
+        SmtpTransport::relay(host)
     };
     let builder = builder
         .map_err(|_| Error::SmtpConnect)?
@@ -204,7 +207,7 @@ pub(in crate::features) fn smtp_transport(
         Authentication::Password(password) => {
             builder.credentials(Credentials::new(account.username.clone(), password.0))
         }
-        Authentication::OAuth(token) => builder
+        Authentication::OAuth(_, token) => builder
             .authentication(vec![Mechanism::Xoauth2])
             .credentials(Credentials::new(account.email.clone(), token.0)),
     }

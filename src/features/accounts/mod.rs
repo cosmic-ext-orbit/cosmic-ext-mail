@@ -35,6 +35,8 @@ pub enum Error {
     ConnectionTask,
     ConnectionTimeout,
     OnlineUnavailable,
+    OnlineAccessFailed,
+    OnlineUpgradeRequired,
     OnlineDisabled,
     OnlineDenied,
     OnlineReconnect,
@@ -63,6 +65,8 @@ impl Error {
             Self::ConnectionTask => fl!("account-error-connection-task"),
             Self::ConnectionTimeout => fl!("account-error-connection-timeout"),
             Self::OnlineUnavailable => fl!("account-error-online-unavailable"),
+            Self::OnlineAccessFailed => fl!("account-error-online-access-failed"),
+            Self::OnlineUpgradeRequired => fl!("account-error-online-upgrade"),
             Self::OnlineDisabled => fl!("account-error-online-disabled"),
             Self::OnlineDenied => fl!("account-error-online-denied"),
             Self::OnlineReconnect => fl!("account-error-online-reconnect"),
@@ -223,7 +227,7 @@ impl Accounts {
                 self.status = Some(Status::Busy);
                 return Task::perform(
                     async move {
-                        online::token(id, false).await?;
+                        online::mail_access(id, false).await?;
                         store.save(account, false, Password::default()).await
                     },
                     |result| Message::Finished(result.map(Outcome::Saved)),

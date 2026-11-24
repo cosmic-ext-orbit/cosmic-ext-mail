@@ -6,8 +6,32 @@ use zbus::{Connection, proxy, zvariant::OwnedObjectPath};
 
 use super::{Account, Error, Password};
 
-pub(super) const IMAP: (&str, u16) = ("imap.gmail.com", 993);
-pub(super) const SMTP: (&str, u16) = ("smtp.gmail.com", 587);
+#[derive(serde::Deserialize, zbus::zvariant::Type)]
+pub(in crate::features) struct MailConnectionSettings {
+    pub(super) imap_host: String,
+    pub(super) imap_port: u16,
+    imap_tls: String,
+    pub(super) smtp_host: String,
+    pub(super) smtp_port: u16,
+    smtp_tls: String,
+    authentication: String,
+}
+
+impl MailConnectionSettings {
+    fn supported(&self) -> bool {
+        self.imap_tls == "tls"
+            && matches!(self.smtp_tls.as_str(), "tls" | "starttls")
+            && self.authentication == "xoauth2"
+            && !self.imap_host.is_empty()
+            && !self.smtp_host.is_empty()
+            && self.imap_port != 0
+            && self.smtp_port != 0
+    }
+
+    pub(super) fn smtp_starttls(&self) -> bool {
+        self.smtp_tls == "starttls"
+    }
+}
 
 #[proxy(
     default_service = "dev.edfloreshz.Accounts",
@@ -16,6 +40,9 @@ pub(super) const SMTP: (&str, u16) = ("smtp.gmail.com", 587);
 )]
 trait Manager {
     fn list_accounts(&self) -> zbus::Result<Vec<OwnedObjectPath>>;
+
+    #[zbus(property)]
+    fn mail_endpoint_version(&self) -> zbus::Result<u32>;
 }
 
 #[proxy(
@@ -25,9 +52,6 @@ trait Manager {
 trait OnlineAccount {
     #[zbus(property)]
     fn id(&self) -> zbus::Result<String>;
-
-    #[zbus(property)]
-    fn provider_id(&self) -> zbus::Result<String>;
 
     #[zbus(property)]
     fn email(&self) -> zbus::Result<String>;
@@ -41,26 +65,36 @@ trait OnlineAccount {
 
 #[proxy(
     default_service = "dev.edfloreshz.Accounts",
+    interface = "dev.edfloreshz.Accounts.Endpoint.Mail"
+)]
+trait MailEndpoint {
+    fn get_connection_settings(&self) -> zbus::Result<MailConnectionSettings>;
+}
+
+#[proxy(
+    default_service = "dev.edfloreshz.Accounts",
     interface = "dev.edfloreshz.Accounts.Credentials"
 )]
 trait Credentials {
-    fn get_access_token(&self, service: &str) -> zbus::Result<(String, i64)>;
+    fn get_mail_access(&self) -> zbus::Result<(MailConnectionSettings, String, i64)>;
     fn invalidate_token(&self) -> zbus::Result<()>;
 }
 
 pub(super) async fn available() -> Result<Vec<Account>, Error> {
     let connection = Connection::session().await.map_err(broker_error)?;
     let manager = ManagerProxy::new(&connection).await.map_err(broker_error)?;
-    let mut accounts = Vec::new();
+    let paths = manager.list_accounts().await.map_err(broker_error)?;
+    let version = manager
+        .mail_endpoint_version()
+        .await
+        .map_err(broker_error)?;
+    if version == 0 {
+        return Err(Error::OnlineUpgradeRequired);
+    }
 
-    for path in manager.list_accounts().await.map_err(broker_error)? {
-        let account = OnlineAccountProxy::builder(&connection)
-            .path(path)
-            .map_err(broker_error)?
-            .build()
-            .await
-            .map_err(broker_error)?;
-        let Ok(Some(account)) = google_account(account).await else {
+    let mut accounts = Vec::new();
+    for path in paths {
+        let Ok(Some(account)) = mail_account(&connection, path).await else {
             continue;
         };
         accounts.push(account);
@@ -69,9 +103,15 @@ pub(super) async fn available() -> Result<Vec<Account>, Error> {
     Ok(accounts)
 }
 
-async fn google_account(account: OnlineAccountProxy<'_>) -> zbus::Result<Option<Account>> {
-    if account.provider_id().await? != "google"
-        || !account.enabled().await?
+async fn mail_account(
+    connection: &Connection,
+    path: OwnedObjectPath,
+) -> zbus::Result<Option<Account>> {
+    let account = OnlineAccountProxy::builder(connection)
+        .path(path.clone())?
+        .build()
+        .await?;
+    if !account.enabled().await?
         || !account
             .enabled_services()
             .await?
@@ -88,34 +128,39 @@ async fn google_account(account: OnlineAccountProxy<'_>) -> zbus::Result<Option<
         return Ok(None);
     };
 
+    let settings = MailEndpointProxy::builder(connection)
+        .path(path)?
+        .build()
+        .await?
+        .get_connection_settings()
+        .await?;
+    if !settings.supported() {
+        return Ok(None);
+    }
+
+    let smtp_starttls = settings.smtp_starttls();
     Ok(Some(Account {
         id,
         email: email.clone(),
         username: email,
-        imap_host: IMAP.0.into(),
-        imap_port: IMAP.1,
-        smtp_host: SMTP.0.into(),
-        smtp_port: SMTP.1,
-        smtp_starttls: true,
+        imap_host: settings.imap_host,
+        imap_port: settings.imap_port,
+        smtp_host: settings.smtp_host,
+        smtp_port: settings.smtp_port,
+        smtp_starttls,
         online: true,
     }))
 }
 
-pub(super) async fn token(id: Uuid, refresh: bool) -> Result<Password, Error> {
+pub(super) async fn mail_access(
+    id: Uuid,
+    refresh: bool,
+) -> Result<(MailConnectionSettings, Password), Error> {
     let connection = Connection::session().await.map_err(broker_error)?;
     let path = format!(
         "/dev/edfloreshz/Accounts/Accounts/{}",
         id.to_string().replace('-', "_")
     );
-    let account = OnlineAccountProxy::builder(&connection)
-        .path(path.as_str())
-        .map_err(broker_error)?
-        .build()
-        .await
-        .map_err(broker_error)?;
-    if account.provider_id().await.map_err(broker_error)? != "google" {
-        return Err(Error::OnlineDisabled);
-    }
     let credentials = CredentialsProxy::builder(&connection)
         .path(path)
         .map_err(broker_error)?
@@ -125,19 +170,22 @@ pub(super) async fn token(id: Uuid, refresh: bool) -> Result<Password, Error> {
     if refresh {
         credentials.invalidate_token().await.map_err(broker_error)?;
     }
-    let (token, _) = credentials
-        .get_access_token("Email")
-        .await
-        .map_err(broker_error)?;
+    let (settings, token, _) = credentials.get_mail_access().await.map_err(broker_error)?;
     if token.is_empty() || token.chars().any(char::is_control) {
         return Err(Error::OnlineReconnect);
     }
-    Ok(Password(token))
+    if !settings.supported() {
+        return Err(Error::OnlineDisabled);
+    }
+    Ok((settings, Password(token)))
 }
 
 fn broker_error(error: zbus::Error) -> Error {
     match error {
         zbus::Error::MethodError(name, _, _) => match name.as_str() {
+            "org.freedesktop.DBus.Error.UnknownProperty"
+            | "org.freedesktop.DBus.Error.UnknownMethod" => Error::OnlineUpgradeRequired,
+            "dev.edfloreshz.Accounts.Error.Failed" => Error::OnlineAccessFailed,
             "dev.edfloreshz.Accounts.Error.NeedsReauth" => Error::OnlineReconnect,
             "dev.edfloreshz.Accounts.Error.AccessDenied"
             | "org.freedesktop.DBus.Error.AccessDenied" => Error::OnlineDenied,
@@ -147,6 +195,14 @@ fn broker_error(error: zbus::Error) -> Error {
             | "org.freedesktop.DBus.Error.UnknownInterface" => Error::OnlineDisabled,
             _ => Error::OnlineUnavailable,
         },
+        zbus::Error::FDO(error)
+            if matches!(
+                *error,
+                zbus::fdo::Error::UnknownProperty(_) | zbus::fdo::Error::UnknownMethod(_)
+            ) =>
+        {
+            Error::OnlineUpgradeRequired
+        }
         _ => Error::OnlineUnavailable,
     }
 }

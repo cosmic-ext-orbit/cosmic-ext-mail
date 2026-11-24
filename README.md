@@ -24,7 +24,8 @@ A [justfile](./justfile) is included by default for the [casey/just][just] comma
 
 To use Gmail, add your Google account in COSMIC Accounts and keep **Email** enabled.
 In Mail, choose **Add account → Use COSMIC Accounts**, select the account, and approve
-Mail access. Mail requests access tokens from Accounts for IMAP and SMTP. You can
+Mail access. Mail requests validated server settings and access tokens from the Accounts
+broker for IMAP and SMTP. Use an up-to-date Accounts daemon. You can
 unlink the account from Mail while keeping it available to your other apps.
 
 You can also add an IMAP/SMTP account with a password or app password.
