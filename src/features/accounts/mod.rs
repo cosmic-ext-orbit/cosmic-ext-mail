@@ -45,6 +45,21 @@ pub enum Error {
     OpenAccountSettings,
 }
 
+impl From<accounts::AccountsError> for Error {
+    fn from(error: accounts::AccountsError) -> Self {
+        use accounts::AccountsError as Broker;
+        match error {
+            Broker::UpgradeRequired => Self::OnlineUpgradeRequired,
+            Broker::Disabled | Broker::Unsupported => Self::OnlineDisabled,
+            Broker::NeedsReauth => Self::OnlineReconnect,
+            Broker::AccessDenied => Self::OnlineDenied,
+            Broker::ConsentTimeout => Self::OnlineConsentTimeout,
+            Broker::Failed => Self::OnlineAccessFailed,
+            Broker::Unavailable => Self::OnlineUnavailable,
+        }
+    }
+}
+
 impl Error {
     pub(super) fn text(self) -> String {
         match self {
@@ -233,10 +248,8 @@ impl Accounts {
                 self.status = Some(Status::Busy);
                 return Task::perform(
                     async {
-                        tokio::process::Command::new("accounts_ui")
-                            .arg("--add-account")
-                            .spawn()
-                            .map(|_| Outcome::OpenedAccountSettings)
+                        accounts::ui::open_add_account()
+                            .map(|()| Outcome::OpenedAccountSettings)
                             .map_err(|_| Error::OpenAccountSettings)
                     },
                     Message::Finished,

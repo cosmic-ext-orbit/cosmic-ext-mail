@@ -26,9 +26,10 @@ Open **Settings → Mail accounts** to see accounts that are available to link. 
 and approve Mail access. **Add account** opens the Accounts app, where you can add Google or
 custom IMAP/SMTP and enable **Email**. Return to Mail to link the new account.
 
-Mail requests server settings and credentials when it connects. Unlinking an account from Mail
-keeps it available to your other apps. Existing accounts configured directly in Mail can still
-be edited or removed in Mail.
+Mail requests server settings and credentials through `accounts_core`, which owns the broker
+client, error classification and mail endpoint validation. Mail only maps those results onto its
+local account model. Unlinking an account from Mail keeps it available to your other apps.
+Existing accounts configured directly in Mail can still be edited or removed in Mail.
 
 ## Background mail
 
