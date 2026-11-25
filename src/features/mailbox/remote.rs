@@ -858,9 +858,6 @@ mod header_tests {
             username: "test".into(),
             imap_host: "localhost".into(),
             imap_port: 993,
-            smtp_host: "localhost".into(),
-            smtp_port: 587,
-            smtp_starttls: true,
             online: false,
             microsoft_graph: false,
         };

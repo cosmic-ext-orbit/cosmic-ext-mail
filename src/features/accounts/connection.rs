@@ -9,51 +9,25 @@ use native_tls::TlsConnector;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
-use super::{Account, Error, Password, online, store};
+use super::{Error, Password, online};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 type Session = imap::Session<native_tls::TlsStream<TcpStream>>;
 
 pub(in crate::features) enum Authentication {
-    Password(Password),
     OAuth(MailConnectionSettings, Password),
     ManagedPassword(MailConnectionSettings, String, Password),
 }
 
 pub(in crate::features) async fn authentication(
-    account: &Account,
+    account: &super::Account,
 ) -> Result<Authentication, Error> {
-    if account.online {
-        online::mail_access(account.id, false).await
-    } else {
-        store::stored_password(account.id)
-            .await
-            .map(Authentication::Password)
-    }
-}
-
-pub(super) async fn check(account: Account, password: Password) -> Result<(), Error> {
-    let auth = if password.0.is_empty() {
-        authentication(&account).await?
-    } else {
-        Authentication::Password(password)
-    };
-    let check = blocking_network(move || {
-        let mut session = login_imap(&account, &auth)?;
-        let _ = session.logout();
-        match smtp_transport(&account, auth)?.test_connection() {
-            Ok(true) => Ok(()),
-            _ => Err(Error::SmtpConnect),
-        }
-    });
-    tokio::time::timeout(Duration::from_secs(45), check)
-        .await
-        .map_err(|_| Error::ConnectionTimeout)?
+    online::mail_access(account.id, false).await
 }
 
 pub(in crate::features) async fn with_imap<T, E>(
-    account: Account,
+    account: super::Account,
     operation: impl FnOnce(&mut Session) -> Result<T, E> + Send + 'static,
 ) -> Result<T, E>
 where
@@ -71,7 +45,7 @@ where
 // Allow a folder sync to run many commands after connecting. The socket still
 // enforces read and write timeouts for an unresponsive server.
 pub(in crate::features) async fn with_imap_session<T, E>(
-    account: Account,
+    account: super::Account,
     operation: impl FnOnce(&mut Session) -> Result<T, E> + Send + 'static,
 ) -> Result<T, E>
 where
@@ -123,7 +97,7 @@ where
     receive.await.map_err(|_| Error::ConnectionTask)?
 }
 
-async fn connect_imap(account: Account, auth: Authentication) -> Result<Session, Error> {
+async fn connect_imap(account: super::Account, auth: Authentication) -> Result<Session, Error> {
     tokio::time::timeout(
         Duration::from_secs(45),
         blocking_network(move || login_imap(&account, &auth)),
@@ -142,12 +116,11 @@ impl imap::Authenticator for Xoauth2 {
     }
 }
 
-fn login_imap(account: &Account, auth: &Authentication) -> Result<Session, Error> {
+fn login_imap(account: &super::Account, auth: &Authentication) -> Result<Session, Error> {
     let (host, port) = match auth {
         Authentication::OAuth(settings, _) | Authentication::ManagedPassword(settings, ..) => {
             (settings.imap_host.as_str(), settings.imap_port)
         }
-        Authentication::Password(_) => (account.imap_host.as_str(), account.imap_port),
     };
     let mut addresses = (host, port)
         .to_socket_addrs()
@@ -170,7 +143,6 @@ fn login_imap(account: &Account, auth: &Authentication) -> Result<Session, Error
     let mut client = imap::Client::new(stream);
     client.read_greeting().map_err(|_| Error::ImapConnect)?;
     match auth {
-        Authentication::Password(password) => client.login(&account.username, &password.0),
         Authentication::ManagedPassword(_, username, password) => {
             client.login(username, &password.0)
         }
@@ -186,7 +158,7 @@ fn login_imap(account: &Account, auth: &Authentication) -> Result<Session, Error
 }
 
 pub(in crate::features) fn smtp_transport(
-    account: &Account,
+    account: &super::Account,
     auth: Authentication,
 ) -> Result<SmtpTransport, Error> {
     let (host, port, starttls) = match &auth {
@@ -194,11 +166,6 @@ pub(in crate::features) fn smtp_transport(
             settings.smtp_host.as_str(),
             settings.smtp_port,
             settings.smtp_starttls,
-        ),
-        Authentication::Password(_) => (
-            account.smtp_host.as_str(),
-            account.smtp_port,
-            account.smtp_starttls,
         ),
     };
     let builder = if starttls {
@@ -211,9 +178,6 @@ pub(in crate::features) fn smtp_transport(
         .port(port)
         .timeout(Some(TIMEOUT));
     Ok(match auth {
-        Authentication::Password(password) => {
-            builder.credentials(Credentials::new(account.username.clone(), password.0))
-        }
         Authentication::ManagedPassword(_, username, password) => {
             builder.credentials(Credentials::new(username, password.0))
         }

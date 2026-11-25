@@ -255,13 +255,13 @@ impl cosmic::Application for AppModel {
         if !self.core.window.show_context {
             return None;
         }
-        Some(match self.context_page {
+        let mut drawer = match self.context_page {
             ContextPage::Settings => {
                 context_drawer::context_drawer(self.settings(), Message::CloseContext)
                     .title(fl!("settings"))
             }
             ContextPage::Accounts => context_drawer::context_drawer(
-                self.accounts.view().map(Message::Accounts),
+                accounts::view(&self.accounts).map(Message::Accounts),
                 Message::CloseContext,
             )
             .title(fl!("accounts")),
@@ -275,7 +275,9 @@ impl cosmic::Application for AppModel {
                 Message::CloseContext,
             )
             .title(fl!("about")),
-        })
+        };
+        drawer.content = widget::toaster(&self.toasts, drawer.content);
+        Some(drawer)
     }
 
     fn nav_model(&self) -> Option<&nav_bar::Model> {
@@ -330,7 +332,7 @@ impl cosmic::Application for AppModel {
             shortcuts::subscription(
                 self.core.main_window_id(),
                 if self.core.window.show_context
-                    && self.context_page == ContextPage::Settings
+                    && self.context_page == ContextPage::Accounts
                     && self.accounts.is_editing()
                 {
                     shortcuts::Scope::Account
@@ -348,18 +350,20 @@ impl cosmic::Application for AppModel {
 
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::Accounts(accounts::Message::Notify(message)) => {
+                return self.mail_action_error(message);
+            }
             Message::Accounts(message) => {
                 let add = matches!(
                     &message,
-                    accounts::Message::Add
-                        | accounts::Message::AddLocal
+                    accounts::Message::AddOnlineOpen
+                        | accounts::Message::AddCustomImapSmtp
                         | accounts::Message::AddProvider(_)
                         | accounts::Message::Reconnect(_)
                 );
                 let reload = matches!(
                     &message,
-                    accounts::Message::Finished(Ok(accounts::Outcome::Saved(_)
-                        | accounts::Outcome::Removed(_)))
+                    accounts::Message::CustomImapSmtpAdded(Ok(_))
                         | accounts::Message::AuthCompleted(Ok(_))
                         | accounts::Message::RemovedOnline(Ok(()))
                         | accounts::Message::ToggleFinished(Ok(_))
@@ -369,12 +373,9 @@ impl cosmic::Application for AppModel {
                     .update(message)
                     .map(|message| Message::Accounts(message).into());
                 if add {
-                    self.context_page = ContextPage::Settings;
+                    self.context_page = ContextPage::Accounts;
                     self.set_show_context(true);
-                    return Task::batch([
-                        update,
-                        self.update(Message::Accounts(accounts::Message::Discover)),
-                    ]);
+                    return update;
                 }
                 return if reload {
                     Task::batch([update, self.reload_mail()])
@@ -467,14 +468,14 @@ impl cosmic::Application for AppModel {
                 let show = self.context_page != page || !self.core.window.show_context;
                 self.context_page = page;
                 self.set_show_context(show);
-                if show && page == ContextPage::Settings {
+                if show && page == ContextPage::Accounts {
                     return self.update(Message::Accounts(accounts::Message::Discover));
                 }
             }
             Message::WindowFocused(id) => {
                 if self.core.main_window_is(id)
                     && self.core.window.show_context
-                    && self.context_page == ContextPage::Settings
+                    && self.context_page == ContextPage::Accounts
                 {
                     return self.update(Message::Accounts(accounts::Message::Discover));
                 }
@@ -634,7 +635,11 @@ impl cosmic::Application for AppModel {
             .into()
         };
 
-        widget::toaster(&self.toasts, content).into()
+        if self.core.window.show_context {
+            content
+        } else {
+            widget::toaster(&self.toasts, content).into()
+        }
     }
 
     fn footer(&self) -> Option<Element<'_, Message>> {
@@ -737,10 +742,16 @@ impl cosmic::Application for AppModel {
             return Task::none();
         }
         if self.core.window.show_context
-            && self.context_page == ContextPage::Settings
+            && self.context_page == ContextPage::Accounts
             && self.accounts.is_editing()
         {
-            return self.update(Message::Accounts(accounts::Message::Back));
+            return self.update(Message::Accounts(accounts::Message::CancelCustomForm));
+        }
+        if self.core.window.show_context
+            && self.context_page == ContextPage::Accounts
+            && self.accounts.is_adding_online()
+        {
+            return self.update(Message::Accounts(accounts::Message::AddOnlineClose));
         }
         if self.composer.is_open() {
             return self.update(Message::Composer(composer::Message::Close));
@@ -884,8 +895,11 @@ impl AppModel {
             Action::SaveDraft => Message::Composer(composer::Message::Autosave),
             Action::DiscardDraft => Message::Composer(composer::Message::ConfirmDiscard(true)),
             Action::CloseDialog => return self.on_escape(),
-            Action::TestAccount => Message::Accounts(accounts::Message::Check),
-            Action::SaveAccount => Message::Accounts(accounts::Message::Save),
+            Action::TestAccount => return Task::none(),
+            Action::SaveAccount if self.accounts.is_editing() => {
+                Message::Accounts(accounts::Message::SubmitCustomImapSmtp)
+            }
+            Action::SaveAccount => return Task::none(),
             action => {
                 let Some(mail) = self.mailbox.selected() else {
                     return Task::none();
@@ -1023,7 +1037,7 @@ impl AppModel {
                 ]);
             }
             mailbox::Message::AddAccount => {
-                return self.update(Message::Accounts(accounts::Message::Add));
+                return self.update(Message::Accounts(accounts::Message::AddOnlineOpen));
             }
             mailbox::Message::Download(
                 request,
