@@ -2280,12 +2280,6 @@ checksum = "75b325c5dbd37f80359721ad39aca5a29fb04c89279657cffdda8736d0c0b9d2"
 [[package]]
 name = "dpi"
 version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
-
-[[package]]
-name = "dpi"
-version = "0.1.2"
 source = "git+https://github.com/pop-os/winit.git?rev=9567503#9567503d34130113e36b0167a2b8829c3756e429"
 
 [[package]]
@@ -8357,7 +8351,7 @@ dependencies = [
  "bitflags 2.13.2",
  "cookie 0.18.2",
  "crossbeam-channel",
- "dpi 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "dpi",
  "env_logger",
  "euclid",
  "gaol",
@@ -9278,7 +9272,7 @@ checksum = "06e4bddf028b69849fe310dfcbdc2707d0eaef1cdc49e48adad60bdffdcc703c"
 dependencies = [
  "bitflags 2.13.2",
  "crossbeam-channel",
- "dpi 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "dpi",
  "euclid",
  "gleam",
  "image",
@@ -9314,7 +9308,7 @@ checksum = "facd09d6c26721642286d9323f52aa06f2c70494a4b237e68866f131b06e33c1"
 dependencies = [
  "bitflags 2.13.2",
  "crossbeam-channel",
- "dpi 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "dpi",
  "euclid",
  "gleam",
  "glow 0.17.0",
@@ -12444,7 +12438,7 @@ dependencies = [
  "bitflags 2.13.2",
  "cfg_aliases",
  "cursor-icon",
- "dpi 0.1.2 (git+https://github.com/pop-os/winit.git?rev=9567503)",
+ "dpi",
  "libc",
  "raw-window-handle",
  "rustix 1.1.6",
@@ -12469,7 +12463,7 @@ source = "git+https://github.com/pop-os/winit.git?rev=9567503#9567503d34130113e3
 dependencies = [
  "android-activity",
  "bitflags 2.13.2",
- "dpi 0.1.2 (git+https://github.com/pop-os/winit.git?rev=9567503)",
+ "dpi",
  "ndk",
  "raw-window-handle",
  "smol_str",
@@ -12485,7 +12479,7 @@ dependencies = [
  "bitflags 2.13.2",
  "block2 0.6.2",
  "dispatch2",
- "dpi 0.1.2 (git+https://github.com/pop-os/winit.git?rev=9567503)",
+ "dpi",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
  "objc2-core-foundation",
@@ -12521,7 +12515,7 @@ source = "git+https://github.com/pop-os/winit.git?rev=9567503#9567503d34130113e3
 dependencies = [
  "bitflags 2.13.2",
  "cursor-icon",
- "dpi 0.1.2 (git+https://github.com/pop-os/winit.git?rev=9567503)",
+ "dpi",
  "keyboard-types",
  "raw-window-handle",
  "smol_str",
@@ -12534,7 +12528,7 @@ version = "0.31.0-beta.2"
 source = "git+https://github.com/pop-os/winit.git?rev=9567503#9567503d34130113e36b0167a2b8829c3756e429"
 dependencies = [
  "bitflags 2.13.2",
- "dpi 0.1.2 (git+https://github.com/pop-os/winit.git?rev=9567503)",
+ "dpi",
  "libredox",
  "orbclient",
  "raw-window-handle",
@@ -12552,7 +12546,7 @@ dependencies = [
  "bitflags 2.13.2",
  "block2 0.6.2",
  "dispatch2",
- "dpi 0.1.2 (git+https://github.com/pop-os/winit.git?rev=9567503)",
+ "dpi",
  "objc2 0.6.5",
  "objc2-core-foundation",
  "objc2-foundation 0.3.2",
@@ -12573,7 +12567,7 @@ dependencies = [
  "bitflags 2.13.2",
  "calloop",
  "cursor-icon",
- "dpi 0.1.2 (git+https://github.com/pop-os/winit.git?rev=9567503)",
+ "dpi",
  "libc",
  "memmap2 0.9.12",
  "raw-window-handle",
@@ -12599,7 +12593,7 @@ dependencies = [
  "bitflags 2.13.2",
  "concurrent-queue",
  "cursor-icon",
- "dpi 0.1.2 (git+https://github.com/pop-os/winit.git?rev=9567503)",
+ "dpi",
  "js-sys",
  "pin-project",
  "raw-window-handle",
@@ -12619,7 +12613,7 @@ source = "git+https://github.com/pop-os/winit.git?rev=9567503#9567503d34130113e3
 dependencies = [
  "bitflags 2.13.2",
  "cursor-icon",
- "dpi 0.1.2 (git+https://github.com/pop-os/winit.git?rev=9567503)",
+ "dpi",
  "raw-window-handle",
  "smol_str",
  "tracing",
@@ -12637,7 +12631,7 @@ dependencies = [
  "bytemuck",
  "calloop",
  "cursor-icon",
- "dpi 0.1.2 (git+https://github.com/pop-os/winit.git?rev=9567503)",
+ "dpi",
  "libc",
  "percent-encoding",
  "raw-window-handle",

@@ -1,0 +1,63 @@
+{
+  "id": "dev.edfloreshz.Mail",
+  "runtime": "org.freedesktop.Platform",
+  "runtime-version": "26.08",
+  "sdk": "org.freedesktop.Sdk",
+  "sdk-extensions": ["org.freedesktop.Sdk.Extension.rust-stable"],
+  "command": "cosmic-ext-mail",
+  "finish-args": [
+    "--share=ipc",
+    "--share=network",
+    "--socket=wayland",
+    "--socket=fallback-x11",
+    "--device=dri",
+    "--talk-name=com.system76.CosmicSettingsDaemon",
+    "--talk-name=com.system76.CosmicSettingsDaemon.*",
+    "--filesystem=xdg-config/cosmic:ro"
+  ],
+  "build-options": {
+    "append-path": "/usr/lib/sdk/rust-stable/bin"
+  },
+  "modules": [
+    {
+      "name": "mail",
+      "buildsystem": "simple",
+      "build-options": {
+        "env": {
+          "CARGO_HOME": "/run/build/mail/cargo",
+          "MOZJS_ARCHIVE": "/run/build/mail/libmozjs.tar.gz"
+        }
+      },
+      "build-commands": [
+        "rm -f cargo/vendor/mozjs_*/Cargo.lock",
+        "cargo build --release --frozen",
+        "install -Dm0755 target/release/cosmic-ext-mail /app/bin/cosmic-ext-mail",
+        "install -Dm0644 target/xdgen/app.desktop /app/share/applications/dev.edfloreshz.Mail.desktop",
+        "install -Dm0644 target/xdgen/app.metainfo.xml /app/share/metainfo/dev.edfloreshz.Mail.metainfo.xml",
+        "install -Dm0644 resources/icons/hicolor/scalable/apps/icon.svg /app/share/icons/hicolor/scalable/apps/dev.edfloreshz.Mail.svg"
+      ],
+      "sources": [
+        {
+          "type": "dir",
+          "path": "..",
+          "skip": [".cargo", ".git", ".flatpak-builder", "dist", "target", "vendor", "vendor.tar"]
+        },
+        "cargo-sources.json",
+        {
+          "type": "file",
+          "only-arches": ["x86_64"],
+          "url": "https://github.com/servo/mozjs/releases/download/mozjs-sys-v153.6.0-1/libmozjs-x86_64-unknown-linux-gnu.tar.gz",
+          "sha256": "4b08d48e98839e058c6523ed103f7874874acfa57a1d54ef93cadc21e7168f37",
+          "dest-filename": "libmozjs.tar.gz"
+        },
+        {
+          "type": "file",
+          "only-arches": ["aarch64"],
+          "url": "https://github.com/servo/mozjs/releases/download/mozjs-sys-v153.6.0-1/libmozjs-aarch64-unknown-linux-gnu.tar.gz",
+          "sha256": "69808fce029a3751079892fa1c103776d8c29da6395a03e63f5fa039259780a6",
+          "dest-filename": "libmozjs.tar.gz"
+        }
+      ]
+    }
+  ]
+}

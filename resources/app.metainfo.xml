@@ -5,6 +5,9 @@
   <project_license>GPL-3.0-only</project_license>
   <name>Mail</name>
   <summary>A mail client for the COSMIC desktop</summary>
+  <description>
+    <p>Read, organize, and send email on the COSMIC desktop.</p>
+  </description>
   <icon type="remote" width="64" height="64" scale="1">
     https://github.com/cosmic-utils/cosmic-ext-mail/raw/main/resources/icons/hicolor/scalable/apps/icon.svg
   </icon>
