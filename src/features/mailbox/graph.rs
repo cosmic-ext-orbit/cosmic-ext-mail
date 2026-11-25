@@ -203,7 +203,6 @@ fn into_mail(account: &Account, folder: &str, message: MsgraphMessage) -> Mail {
 
     let mut raw_headers = Vec::new();
     for header in message.internet_message_headers {
-        // Parse RFC threading headers using the same parser as IMAP.
         if ["message-id", "references", "in-reply-to"]
             .iter()
             .any(|name| header.name.eq_ignore_ascii_case(name))

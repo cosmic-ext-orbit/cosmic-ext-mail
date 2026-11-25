@@ -245,7 +245,6 @@ async fn sync(
                         })
                         .collect::<Vec<_>>()
                 });
-            // Deliver the folder while this connection fills in missing bodies.
             let _ = send.send(snapshot);
             if let Some(pending) = pending.filter(|pending| !pending.is_empty()) {
                 let _ = downloads.send(DownloadEvent::Started(pending.len()));
@@ -429,7 +428,6 @@ fn sync_headers(
         }
         let _ = downloads.send(DownloadEvent::HeadersFetched(batch.len()));
 
-        // Keep a recoverable cache without rewriting the whole index for every batch.
         if fetched_since_checkpoint && processed >= next_checkpoint && processed < missing.len() {
             save_header_checkpoint(cache, folder, uid_validity, &headers);
             fetched_since_checkpoint = false;

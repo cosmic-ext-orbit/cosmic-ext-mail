@@ -312,9 +312,6 @@ impl Accounts {
                 }
                 Err(error) => {
                     self.auth = None;
-                    // Keep the provider picker open: a failed sign-in attempt
-                    // should let the user retry instead of dropping back to
-                    // the empty account overview.
                     self.busy = false;
                     return notify(error.text());
                 }

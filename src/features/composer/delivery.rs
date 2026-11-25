@@ -87,7 +87,6 @@ fn build_message(
         .message_id(Some(message_id))
         .date_now();
     if mime_delivery {
-        // Graph derives recipients from MIME headers, including Bcc.
         builder = builder.keep_bcc();
     }
     if let Some(reply_to) = &draft.reply_to {

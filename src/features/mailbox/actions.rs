@@ -49,7 +49,6 @@ pub(super) struct PendingChange {
 
 impl PendingChange {
     pub(super) fn apply(&self, messages: &mut Vec<Mail>) {
-        // A sync result can predate a change confirmed earlier in this queue.
         if let Some(mail) = messages.iter_mut().find(|mail| mail.id == self.original.id) {
             mail.unread = self.original.unread;
             mail.flagged = self.original.flagged;
@@ -155,7 +154,6 @@ impl Mailbox {
             }
         }
 
-        // Skip queued toggles already satisfied by the last confirmed server state.
         let next = pending
             .queued
             .iter()

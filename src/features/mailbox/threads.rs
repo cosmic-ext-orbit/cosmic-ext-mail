@@ -31,7 +31,6 @@ impl ThreadHeaders {
 }
 
 pub(super) struct Threads {
-    // Message indices follow the folder's newest-first ordering.
     groups: Vec<Vec<usize>>,
     oldest_first: Vec<usize>,
     messages: usize,
