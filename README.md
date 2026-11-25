@@ -27,12 +27,11 @@ library owns the account records and encrypted credentials inside Mail; no separ
 installation, daemon, or consent app is required. Use **Reconnect** to refresh approval,
 **Remove** to delete an account and its credentials, and the toggle to pause or resume it.
 
-OAuth client registrations are supplied by the packager, not committed to this repository. Set
-`ACCOUNTS_GOOGLE_MAIL_CLIENT_ID` and `ACCOUNTS_MICROSOFT_MAIL_CLIENT_ID` before launching Mail,
-plus `ACCOUNTS_MICROSOFT_MAIL_EXCHANGE_CLIENT_ID` when IMAP/SMTP needs its own registration.
-For registrations that require a secret, also set the matching `_CLIENT_SECRET`; desktop clients
-may use PKCE without a secret. Microsoft Graph and Exchange Online use separate resources, so a
-Graph token is never reused for IMAP/SMTP.
+Mail ships with Google and Microsoft desktop OAuth registrations. To use a custom
+registration, set `ACCOUNTS_GOOGLE_MAIL_CLIENT_ID` or `ACCOUNTS_MICROSOFT_MAIL_CLIENT_ID`
+before launching Mail. Set `ACCOUNTS_MICROSOFT_MAIL_EXCHANGE_CLIENT_ID` if you use a separate
+registration for Exchange IMAP/SMTP. If a custom registration requires a secret, also set the
+matching `_CLIENT_SECRET`. Mail obtains separate tokens for Microsoft Graph and Exchange Online.
 
 Sign-in fails entirely if secure storage is unavailable or locked; credentials are never stored
 in plaintext or kept only in memory. Accounts configured directly in Mail still use Mail's local
