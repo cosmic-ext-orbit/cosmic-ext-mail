@@ -170,6 +170,7 @@ appimage:
     test -s squashfs-root/{{appid}}.svg
     test -s squashfs-root/usr/share/metainfo/{{appdata}}
     grep -Fx 'Icon={{appid}}' squashfs-root/{{desktop}}
+    grep -Fx 'StartupWMClass={{appid}}' squashfs-root/{{desktop}}
     sha256sum "$APPIMAGE" "$APPIMAGE.zsync" > SHA256SUMS
     sha256sum --check SHA256SUMS
     mv -- "$APPIMAGE" "$APPIMAGE.zsync" SHA256SUMS "$output/"

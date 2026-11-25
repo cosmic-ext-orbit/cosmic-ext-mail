@@ -6,6 +6,7 @@ Icon=dev.edfloreshz.Mail
 Exec=cosmic-ext-mail %F
 Terminal=false
 StartupNotify=true
+StartupWMClass=dev.edfloreshz.Mail
 Categories=Network;Email;
 Keywords=COSMIC
 MimeType=
