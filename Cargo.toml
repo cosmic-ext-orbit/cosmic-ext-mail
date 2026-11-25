@@ -66,3 +66,7 @@ features = [
 # cosmic-config = { path = "../libcosmic/cosmic-config" }
 # cosmic-theme = { path = "../libcosmic/cosmic-theme" }
 
+[patch.crates-io]
+# Share winit's dpi source with Servo so offline vendoring has one copy.
+dpi = { git = "https://github.com/pop-os/winit.git", rev = "9567503" }
+
