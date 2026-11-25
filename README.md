@@ -22,14 +22,21 @@ A [justfile](./justfile) is included by default for the [casey/just][just] comma
 
 ## Mail accounts
 
-Open **Settings → Mail accounts** to see accounts that are available to link. Select **Link**
-and approve Mail access. **Add account** opens the Accounts app, where you can add Google or
-custom IMAP/SMTP and enable **Email**. Return to Mail to link the new account.
+Open **Settings → Mail accounts** to sign in with Google or Microsoft. The embedded `accounts`
+library owns the account records and encrypted credentials inside Mail; no separate Accounts
+installation, daemon, or consent app is required. Use **Reconnect** to refresh approval,
+**Remove** to delete an account and its credentials, and the toggle to pause or resume it.
 
-Mail requests server settings and credentials through `accounts_core`, which owns the broker
-client, error classification and mail endpoint validation. Mail only maps those results onto its
-local account model. Unlinking an account from Mail keeps it available to your other apps.
-Existing accounts configured directly in Mail can still be edited or removed in Mail.
+OAuth client registrations are supplied by the packager, not committed to this repository. Set
+`ACCOUNTS_GOOGLE_MAIL_CLIENT_ID` and `ACCOUNTS_MICROSOFT_MAIL_CLIENT_ID` before launching Mail,
+plus `ACCOUNTS_MICROSOFT_MAIL_EXCHANGE_CLIENT_ID` when IMAP/SMTP needs its own registration.
+For registrations that require a secret, also set the matching `_CLIENT_SECRET`; desktop clients
+may use PKCE without a secret. Microsoft Graph and Exchange Online use separate resources, so a
+Graph token is never reused for IMAP/SMTP.
+
+Sign-in fails entirely if secure storage is unavailable or locked; credentials are never stored
+in plaintext or kept only in memory. Accounts configured directly in Mail still use Mail's local
+account editor with their stored passwords.
 
 ## Background mail
 

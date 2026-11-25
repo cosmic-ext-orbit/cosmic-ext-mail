@@ -304,9 +304,7 @@ impl cosmic::Application for AppModel {
                 });
         Subscription::batch([
             photos,
-            accounts::account_toggles().map(|()| Message::AccountsChanged),
-            accounts::service_changes(self.accounts.online_ids())
-                .map(|()| Message::AccountsChanged),
+            accounts::changes().map(|()| Message::AccountsChanged),
             self.composer
                 .subscription(self.core.main_window_id())
                 .map(Message::Composer),
@@ -340,12 +338,20 @@ impl cosmic::Application for AppModel {
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Accounts(message) => {
-                let add = matches!(&message, accounts::Message::Add);
+                let add = matches!(
+                    &message,
+                    accounts::Message::Add
+                        | accounts::Message::AddLocal
+                        | accounts::Message::AddProvider(_)
+                        | accounts::Message::Reconnect(_)
+                );
                 let reload = matches!(
                     &message,
                     accounts::Message::Finished(Ok(accounts::Outcome::Saved(_)
-                        | accounts::Outcome::Disabled(_)
                         | accounts::Outcome::Removed(_)))
+                        | accounts::Message::AuthCompleted(Ok(_))
+                        | accounts::Message::RemovedOnline(Ok(()))
+                        | accounts::Message::ToggleFinished(Ok(_))
                 );
                 let update = self
                     .accounts
@@ -366,9 +372,12 @@ impl cosmic::Application for AppModel {
                 };
             }
             Message::AccountsChanged => {
-                return Task::perform(accounts::enabled_ids(), |result| {
-                    Message::AccountsAvailability(result).into()
-                });
+                return Task::batch([
+                    Task::perform(accounts::enabled_ids(), |result| {
+                        Message::AccountsAvailability(result).into()
+                    }),
+                    self.update(Message::Accounts(accounts::Message::Discover)),
+                ]);
             }
             Message::AccountsAvailability(result) => {
                 let before: std::collections::HashSet<_> =

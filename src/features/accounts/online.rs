@@ -1,86 +1,125 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-use accounts::{AccountsClient, MailCredentials, models::Service};
-use cosmic::iced::{
-    Subscription,
-    futures::{StreamExt, stream},
+use accounts::{
+    Account as ManagedAccount, Accounts, AuthRequest, Config, Endpoint, Event,
+    MailConnectionSettings, MailCredentials, Provider, Resource, Service,
 };
+use cosmic::iced::{Subscription, futures::stream};
 use lettre::Address;
+use tokio::sync::{OnceCell, broadcast::error::RecvError};
 use uuid::Uuid;
 
 use super::{Account, Error, Password, connection::Authentication};
 
-// Mail's transport layer consumes the broker's settings directly.
-pub(super) use accounts::MailConnectionSettings;
+const APP_ID: &str = "dev.edfloreshz.Mail";
+static MANAGER: OnceCell<Accounts> = OnceCell::const_new();
 
-/// Returns a list of all available mail accounts, filtering out any invalid email addresses.
-pub(super) async fn available() -> Result<Vec<Account>, Error> {
-    let client = AccountsClient::connect().await.map_err(Error::from)?;
-    let mail = client.list_mail_accounts().await;
-    let graph = client.list_enabled_accounts(Service::Email).await;
-    let mut accounts = Vec::new();
-    let graph_ids: std::collections::HashSet<_> = graph
-        .as_ref()
-        .ok()
-        .into_iter()
-        .flatten()
-        .filter(|account| account.provider == "microsoft")
-        .filter_map(|account| {
-            let email = valid_email(account)?;
-            accounts.push(Account {
-                id: account.id,
-                email: email.to_owned(),
-                username: email.to_owned(),
-                imap_host: String::new(),
-                imap_port: 0,
-                smtp_host: String::new(),
-                smtp_port: 0,
-                smtp_starttls: false,
-                online: true,
-                microsoft_graph: true,
-            });
-            Some(account.id)
+pub(super) async fn manager() -> Result<&'static Accounts, Error> {
+    MANAGER
+        .get_or_try_init(|| async {
+            let config = Config::new(APP_ID)
+                .with_client_from_env(Provider::Google, Service::Mail)
+                .with_client_from_env(Provider::Microsoft, Service::Mail)
+                .with_resource_client_from_env(
+                    Provider::Microsoft,
+                    Service::Mail,
+                    Resource::Exchange,
+                );
+            Accounts::new(config).await
         })
-        .collect();
+        .await
+        .map_err(Error::from)
+}
 
-    match mail {
-        Ok(mail) => {
-            for (account, settings) in mail {
-                if graph_ids.contains(&account.id) {
-                    continue;
-                }
-                let Some(email) = valid_email(&account) else {
-                    continue;
-                };
-                let smtp_starttls = settings.smtp_starttls();
-                accounts.push(Account {
-                    id: account.id,
-                    email: email.to_owned(),
-                    username: email.to_owned(),
-                    imap_host: settings.imap_host,
-                    imap_port: settings.imap_port,
-                    smtp_host: settings.smtp_host,
-                    smtp_port: settings.smtp_port,
-                    smtp_starttls,
-                    online: true,
-                    microsoft_graph: false,
-                });
-            }
-        }
-        Err(error) if accounts.is_empty() => return Err(Error::from(error)),
-        Err(_) => {}
+fn provider_settings(provider: Provider) -> MailConnectionSettings {
+    match provider {
+        Provider::Google => MailConnectionSettings {
+            transport: accounts::MailTransport::ImapSmtp,
+            imap_host: "imap.gmail.com".into(),
+            imap_port: 993,
+            imap_tls: true,
+            smtp_host: "smtp.gmail.com".into(),
+            smtp_port: 587,
+            smtp_starttls: true,
+        },
+        _ => MailConnectionSettings {
+            transport: accounts::MailTransport::ImapSmtp,
+            imap_host: "outlook.office365.com".into(),
+            imap_port: 993,
+            imap_tls: true,
+            smtp_host: "smtp.office365.com".into(),
+            smtp_port: 587,
+            smtp_starttls: true,
+        },
     }
-
-    accounts.sort_by(|a, b| a.email.cmp(&b.email));
-    Ok(accounts)
 }
 
-fn valid_email(account: &accounts::models::Account) -> Option<&str> {
+fn convert(account: &ManagedAccount) -> Option<Account> {
     let email = account.email_or_identity();
-    (!email.chars().any(char::is_control) && email.parse::<Address>().is_ok()).then_some(email)
+    if email.chars().any(char::is_control) || email.parse::<Address>().is_err() {
+        return None;
+    }
+    if account.provider == Provider::Microsoft {
+        return Some(Account {
+            id: account.id,
+            email: email.to_owned(),
+            username: email.to_owned(),
+            imap_host: String::new(),
+            imap_port: 0,
+            smtp_host: String::new(),
+            smtp_port: 0,
+            smtp_starttls: false,
+            online: true,
+            microsoft_graph: true,
+        });
+    }
+    let settings = match &account.endpoint {
+        Endpoint::ImapSmtp(settings) => MailConnectionSettings {
+            transport: accounts::MailTransport::ImapSmtp,
+            imap_host: settings.imap_host.clone(),
+            imap_port: settings.imap_port,
+            imap_tls: settings.imap_tls,
+            smtp_host: settings.smtp_host.clone(),
+            smtp_port: settings.smtp_port,
+            smtp_starttls: settings.smtp_starttls,
+        },
+        _ => provider_settings(account.provider),
+    };
+    Some(Account {
+        id: account.id,
+        email: email.to_owned(),
+        username: email.to_owned(),
+        imap_host: settings.imap_host,
+        imap_port: settings.imap_port,
+        smtp_host: settings.smtp_host,
+        smtp_port: settings.smtp_port,
+        smtp_starttls: settings.smtp_starttls,
+        online: true,
+        microsoft_graph: false,
+    })
 }
 
-/// IDs of broker accounts whose Email service is currently usable.
+/// Returns all app-owned accounts exposing the Mail service.
+pub(super) async fn managed() -> Result<Vec<ManagedAccount>, Error> {
+    Ok(manager().await?.list(Service::Mail).await)
+}
+
+pub(super) fn enabled_from(managed: &[ManagedAccount]) -> Vec<Account> {
+    let mut accounts: Vec<Account> = managed
+        .iter()
+        .filter(|account| account.enabled)
+        .filter_map(convert)
+        .collect();
+    accounts.sort_by(|a, b| a.email.cmp(&b.email));
+    accounts
+}
+
+/// Returns the Mail accounts that are currently enabled.
+pub(super) async fn available() -> Result<Vec<Account>, Error> {
+    Ok(enabled_from(&managed().await?))
+}
+
+/// IDs of embedded accounts whose Mail service is currently usable.
 pub(crate) async fn enabled_ids() -> Result<Vec<Uuid>, Error> {
     Ok(available()
         .await?
@@ -89,77 +128,104 @@ pub(crate) async fn enabled_ids() -> Result<Vec<Uuid>, Error> {
         .collect())
 }
 
+pub(super) async fn set_enabled(id: Uuid, enabled: bool) -> Result<(), Error> {
+    manager().await?.set_enabled(id, enabled).await?;
+    Ok(())
+}
+
 pub(crate) async fn graph_token(id: Uuid, refresh: bool) -> Result<Password, Error> {
-    let client = AccountsClient::connect().await.map_err(Error::from)?;
-    // This is the provider's primary OAuth token. The IMAP/SMTP credential
-    // API returns an Exchange token for Microsoft and must not be used here.
-    let (token, _) = client
-        .access_token(&id, &Service::Email, refresh)
-        .await
-        .map_err(Error::from)?;
+    let token = manager()
+        .await?
+        .access_token(id, Service::Mail, refresh)
+        .await?;
     Ok(Password(token))
 }
 
-/// Watches the broker's global account enable/disable signal.
-pub(crate) fn account_toggles() -> Subscription<()> {
-    Subscription::run_with((), |_| {
-        stream::unfold(
-            None,
-            |stream: Option<accounts::proxy::AccountToggledStream>| async move {
-                let mut stream = match stream {
-                    Some(stream) => stream,
-                    None => {
-                        let client = AccountsClient::connect().await.ok()?;
-                        client.receive_account_toggled().await.ok()?
-                    }
-                };
-                stream.next().await?;
-                Some(((), Some(stream)))
-            },
-        )
-    })
+pub(super) async fn begin(provider: Provider) -> Result<AuthRequest, Error> {
+    let manager = manager().await?;
+    accounts::ui::sign_in(manager, provider, Service::Mail)
+        .await
+        .map_err(Error::from)
 }
 
-/// Watches per-service enable/disable signals for the saved online accounts.
-pub(crate) fn service_changes(ids: Vec<Uuid>) -> Subscription<()> {
-    Subscription::run_with(ids, |ids| {
-        stream::unfold(ids.clone(), |ids| async move {
-            let streams = service_streams(&ids).await;
-            stream::select_all(streams).next().await?;
-            Some(((), ids))
+pub(super) async fn complete(request: AuthRequest) -> Result<ManagedAccount, Error> {
+    manager()
+        .await?
+        .complete_auth(request)
+        .await
+        .map_err(Error::from)
+}
+
+pub(super) async fn reconnect(id: Uuid) -> Result<AuthRequest, Error> {
+    let request = manager().await?.reconnect(id).await?;
+    open::that(&request.url).map_err(|_| Error::OnlineAuthFailed)?;
+    Ok(request)
+}
+
+pub(super) fn cancel(state: &str) {
+    if let Some(manager) = MANAGER.get() {
+        let state = state.to_owned();
+        tokio::spawn(async move {
+            manager.cancel_auth(&state).await;
+        });
+    }
+}
+
+pub(super) async fn remove(id: Uuid) -> Result<(), Error> {
+    manager().await?.remove(id).await.map_err(Error::from)
+}
+
+/// Watches the embedded manager for Mail account changes.
+pub(crate) fn changes() -> Subscription<()> {
+    Subscription::run_with((), |()| {
+        stream::unfold((), |()| async move {
+            match manager().await {
+                Ok(accounts) => {
+                    let mut events = accounts.subscribe();
+                    loop {
+                        match events.recv().await {
+                            Ok(Event::AccountsChanged(Service::Mail))
+                            | Err(RecvError::Lagged(_)) => break,
+                            Ok(_) => continue,
+                            Err(RecvError::Closed) => {
+                                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                                break;
+                            }
+                        }
+                    }
+                }
+                Err(_) => tokio::time::sleep(std::time::Duration::from_secs(30)).await,
+            }
+            Some(((), ()))
         })
     })
 }
 
-async fn service_streams(ids: &[Uuid]) -> Vec<accounts::proxy::ServicesChangedStream> {
-    let Ok(client) = AccountsClient::connect().await else {
-        return Vec::new();
-    };
-    let mut streams = Vec::with_capacity(ids.len());
-    for id in ids {
-        if let Ok(stream) = client.receive_services_changed(id).await {
-            streams.push(stream);
-        }
-    }
-    streams
-}
-
-/// Returns the mail access credentials for the given account ID, optionally refreshing the credentials.
+/// Returns the mail access credentials for the given account ID.
 pub(super) async fn mail_access(id: Uuid, refresh: bool) -> Result<Authentication, Error> {
-    let client = AccountsClient::connect().await.map_err(Error::from)?;
-    let credentials = client
-        .mail_credentials(&id, refresh)
-        .await
-        .map_err(Error::from)?;
-
+    let manager = manager().await?;
+    if refresh {
+        let account = manager.get(id).await.ok_or(Error::AccountMissing)?;
+        let resource = match account.provider {
+            Provider::Microsoft => Resource::Exchange,
+            Provider::Google => Resource::Primary,
+            _ => Resource::ImapSmtp,
+        };
+        manager.refresh(id, resource).await?;
+    }
+    let credentials = manager.mail_access(id).await?;
     Ok(match credentials {
-        MailCredentials::OAuth {
-            settings, token, ..
-        } => Authentication::OAuth(settings, Password(token)),
+        MailCredentials::OAuth { settings, token, .. } => {
+            Authentication::OAuth(settings, Password(token.expose().to_owned()))
+        }
         MailCredentials::Password {
             settings,
             username,
             password,
-        } => Authentication::ManagedPassword(settings, username, Password(password)),
+        } => Authentication::ManagedPassword(
+            settings,
+            username,
+            Password(password.expose().to_owned()),
+        ),
     })
 }
