@@ -7,7 +7,7 @@ description = "A mail client for the COSMIC desktop"
 repository = "https://github.com/cosmic-utils/cosmic-ext-mail"
 
 [dependencies]
-accounts = { path = "../cosmic-ext-accounts/crates/accounts", package = "accounts", features = ["mail", "libcosmic"] }
+accounts = { git = "https://github.com/cosmic-utils/accounts", features = ["mail", "libcosmic"] }
 base64 = "0.22"
 chrono = "0.4"
 euclid = "0.22"
