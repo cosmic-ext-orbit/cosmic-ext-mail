@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
+use accounts::MailConnectionSettings;
 use lettre::{
     SmtpTransport,
     transport::smtp::authentication::{Credentials, Mechanism},
@@ -16,8 +17,8 @@ type Session = imap::Session<native_tls::TlsStream<TcpStream>>;
 
 pub(in crate::features) enum Authentication {
     Password(Password),
-    OAuth(online::MailConnectionSettings, Password),
-    ManagedPassword(online::MailConnectionSettings, String, Password),
+    OAuth(MailConnectionSettings, Password),
+    ManagedPassword(MailConnectionSettings, String, Password),
 }
 
 pub(in crate::features) async fn authentication(
@@ -192,7 +193,7 @@ pub(in crate::features) fn smtp_transport(
         Authentication::OAuth(settings, _) | Authentication::ManagedPassword(settings, ..) => (
             settings.smtp_host.as_str(),
             settings.smtp_port,
-            settings.smtp_starttls(),
+            settings.smtp_starttls,
         ),
         Authentication::Password(_) => (
             account.smtp_host.as_str(),

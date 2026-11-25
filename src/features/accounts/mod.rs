@@ -6,6 +6,7 @@ mod online;
 mod store;
 mod view;
 
+use accounts::{AuthRequest, Provider};
 use crate::fl;
 use cosmic::Task;
 use std::collections::HashSet;
@@ -14,7 +15,7 @@ use uuid::Uuid;
 pub(super) use connection::{authentication, smtp_transport, with_imap, with_imap_session};
 use model::Form;
 pub use model::{Account, Field, Password};
-pub(crate) use online::{account_toggles, enabled_ids, graph_token, service_changes};
+pub(crate) use online::{changes, enabled_ids, graph_token};
 use store::Store;
 
 #[derive(Clone, Copy, Debug)]
@@ -38,26 +39,36 @@ pub enum Error {
     ConnectionTimeout,
     OnlineUnavailable,
     OnlineAccessFailed,
-    OnlineUpgradeRequired,
     OnlineDisabled,
-    OnlineDenied,
     OnlineReconnect,
     OnlineConsentTimeout,
+    OnlineAuthFailed,
+    OnlineCancelled,
     OnlineAlreadyLinked,
-    OpenAccountSettings,
 }
 
-impl From<accounts::AccountsError> for Error {
-    fn from(error: accounts::AccountsError) -> Self {
-        use accounts::AccountsError as Broker;
+impl From<accounts::Error> for Error {
+    fn from(error: accounts::Error) -> Self {
+        use accounts::Error as Library;
         match error {
-            Broker::UpgradeRequired => Self::OnlineUpgradeRequired,
-            Broker::Disabled | Broker::Unsupported => Self::OnlineDisabled,
-            Broker::NeedsReauth => Self::OnlineReconnect,
-            Broker::AccessDenied => Self::OnlineDenied,
-            Broker::ConsentTimeout => Self::OnlineConsentTimeout,
-            Broker::Failed => Self::OnlineAccessFailed,
-            Broker::Unavailable => Self::OnlineUnavailable,
+            Library::StorageUnavailable(_) | Library::StorageCorrupt(_) => {
+                Self::OnlineUnavailable
+            }
+            Library::InvalidClientConfig(_) | Library::MissingClientConfig(_, _) => {
+                Self::OnlineAccessFailed
+            }
+            Library::AuthenticationFailed(_) | Library::InvalidState => Self::OnlineAuthFailed,
+            Library::Cancelled => Self::OnlineCancelled,
+            Library::CallbackTimeout => Self::OnlineConsentTimeout,
+            Library::NeedsReauth(_) => Self::OnlineReconnect,
+            Library::FeatureDisabled(_) | Library::UnsupportedProvider(_, _) => {
+                Self::OnlineDisabled
+            }
+            Library::AccountAlreadyExists(_, _) => Self::OnlineAlreadyLinked,
+            Library::AccountNotFound(_)
+            | Library::InvalidEndpoint(_)
+            | Library::Network(_)
+            | Library::ProviderResponse(_) => Self::OnlineAccessFailed,
         }
     }
 }
@@ -84,13 +95,12 @@ impl Error {
             Self::ConnectionTimeout => fl!("account-error-connection-timeout"),
             Self::OnlineUnavailable => fl!("account-error-online-unavailable"),
             Self::OnlineAccessFailed => fl!("account-error-online-access-failed"),
-            Self::OnlineUpgradeRequired => fl!("account-error-online-upgrade"),
             Self::OnlineDisabled => fl!("account-error-online-disabled"),
-            Self::OnlineDenied => fl!("account-error-online-denied"),
             Self::OnlineReconnect => fl!("account-error-online-reconnect"),
             Self::OnlineConsentTimeout => fl!("account-error-online-consent-timeout"),
+            Self::OnlineAuthFailed => fl!("account-error-online-auth-failed"),
+            Self::OnlineCancelled => fl!("account-error-online-cancelled"),
             Self::OnlineAlreadyLinked => fl!("account-error-online-already-linked"),
-            Self::OpenAccountSettings => fl!("account-error-open-settings"),
         }
     }
 }
@@ -98,8 +108,17 @@ impl Error {
 #[derive(Clone, Debug)]
 pub enum Message {
     Add,
+    AddLocal,
+    AddProvider(Provider),
+    AuthStarted(Result<AuthRequest, Error>),
+    AuthCompleted(Result<accounts::Account, Error>),
+    CancelAuth(String),
+    Reconnect(Uuid),
+    RemoveOnline(Uuid),
+    RemovedOnline(Result<(), Error>),
+    ToggleFinished(Result<(Uuid, bool), Error>),
     Discover,
-    Discovered(Result<Vec<Account>, Error>),
+    Discovered(Result<Vec<accounts::Account>, Error>),
     ToggleLink(Uuid, bool),
     Edit(Uuid),
     Change(Field, String),
@@ -116,9 +135,7 @@ pub enum Message {
 #[derive(Clone, Debug)]
 pub enum Outcome {
     Checked,
-    OpenedAccountSettings,
     Saved(Vec<Account>),
-    Disabled(Vec<Account>),
     Removed(Vec<Account>),
 }
 
@@ -133,7 +150,6 @@ enum Status {
     Busy,
     Checked,
     Saved,
-    Disabled,
     Removed,
     Error(Error),
 }
@@ -144,7 +160,6 @@ impl Status {
             Self::Busy => fl!("account-working"),
             Self::Checked => fl!("account-check-success"),
             Self::Saved => fl!("account-save-success"),
-            Self::Disabled => fl!("account-disable-success"),
             Self::Removed => fl!("account-remove-success"),
             Self::Error(error) => error.text(),
         }
@@ -155,14 +170,16 @@ pub struct Accounts {
     store: Result<Store, Error>,
     accounts: Vec<Account>,
     active: Vec<Account>,
+    managed: Vec<accounts::Account>,
     available: Vec<Account>,
-    /// Account IDs whose Email service is currently usable in the broker.
+    /// Account IDs whose Mail service is currently enabled.
     ///
     /// `None` means the broker has not been queried yet, so saved online
     /// accounts stay hidden until the first successful check.
     usable_online: Option<HashSet<Uuid>>,
     discovering: bool,
     discovery_error: Option<Error>,
+    auth: Option<AuthRequest>,
     screen: Screen,
     status: Option<Status>,
 }
@@ -181,24 +198,21 @@ impl Accounts {
                 .cloned()
                 .collect(),
             accounts,
+            managed: Vec::new(),
             available: Vec::new(),
             usable_online: None,
             discovering: false,
             discovery_error: None,
+            auth: None,
             screen: Screen::List,
             status: None,
         }
     }
 
-    pub fn saved(&self) -> Result<&[Account], Error> {
-        self.store.as_ref().map_err(|error| *error)?;
-        Ok(&self.accounts)
-    }
-
     /// Accounts Mail may actually use for mail traffic.
     ///
-    /// Local accounts are always usable. Online accounts are hidden until the
-    /// broker confirms their Email service is enabled.
+    /// Local accounts are always usable. Embedded online accounts are usable
+    /// when their Mail service is enabled.
     pub fn usable(&self) -> Result<&[Account], Error> {
         self.store.as_ref().map_err(|error| *error)?;
         Ok(&self.active)
@@ -212,15 +226,6 @@ impl Accounts {
         self.usable()
             .unwrap_or_default()
             .iter()
-            .map(|account| account.id)
-            .collect()
-    }
-
-    pub fn online_ids(&self) -> Vec<Uuid> {
-        self.saved()
-            .unwrap_or_default()
-            .iter()
-            .filter(|account| account.online)
             .map(|account| account.id)
             .collect()
     }
@@ -265,6 +270,10 @@ impl Accounts {
         matches!(self.screen, Screen::Edit(_))
     }
 
+    pub(super) fn auth(&self) -> Option<&AuthRequest> {
+        self.auth.as_ref()
+    }
+
     fn is_busy(&self) -> bool {
         matches!(self.status, Some(Status::Busy))
     }
@@ -277,17 +286,21 @@ impl Accounts {
                 }
                 self.discovering = true;
                 self.discovery_error = None;
-                return Task::perform(online::available(), Message::Discovered);
+                return Task::perform(online::managed(), Message::Discovered);
             }
             Message::Discovered(result) => {
                 self.discovering = false;
                 match result {
-                    Ok(accounts) => {
-                        self.set_usable_online(accounts.iter().map(|account| account.id).collect());
-                        self.available = accounts;
+                    Ok(managed) => {
+                        self.available = online::enabled_from(&managed);
+                        self.set_usable_online(
+                            self.available.iter().map(|account| account.id).collect(),
+                        );
+                        self.managed = managed;
                     }
                     Err(error) => {
                         self.available.clear();
+                        self.managed.clear();
                         self.discovery_error = Some(error);
                     }
                 }
@@ -295,17 +308,11 @@ impl Accounts {
             }
             Message::Finished(result) => {
                 self.status = match result {
-                    Ok(Outcome::OpenedAccountSettings) => None,
                     Ok(Outcome::Checked) => Some(Status::Checked),
                     Ok(Outcome::Saved(accounts)) => {
                         self.set_accounts(accounts);
                         self.screen = Screen::List;
                         Some(Status::Saved)
-                    }
-                    Ok(Outcome::Disabled(accounts)) => {
-                        self.set_accounts(accounts);
-                        self.screen = Screen::List;
-                        Some(Status::Disabled)
                     }
                     Ok(Outcome::Removed(accounts)) => {
                         self.set_accounts(accounts);
@@ -315,6 +322,56 @@ impl Accounts {
                     Err(error) => Some(Status::Error(error)),
                 };
                 return Task::none();
+            }
+            Message::AuthStarted(ref result) => match result {
+                Ok(request) => {
+                    self.auth = Some(request.clone());
+                    self.status = Some(Status::Busy);
+                    return Task::perform(online::complete(request.clone()), |result| {
+                        Message::AuthCompleted(result)
+                    });
+                }
+                Err(error) => {
+                    self.auth = None;
+                    self.status = Some(Status::Error(*error));
+                }
+            },
+            Message::AuthCompleted(result) => {
+                self.auth = None;
+                self.status = match result {
+                    Ok(_) => Some(Status::Saved),
+                    Err(Error::OnlineCancelled) => None,
+                    Err(error) => Some(Status::Error(error)),
+                };
+                return Task::perform(online::managed(), Message::Discovered);
+            }
+            Message::CancelAuth(state) => {
+                online::cancel(&state);
+                self.auth = None;
+                self.status = None;
+                return Task::perform(online::managed(), Message::Discovered);
+            }
+            Message::RemovedOnline(result) => {
+                self.status = match result {
+                    Ok(()) => Some(Status::Removed),
+                    Err(error) => Some(Status::Error(error)),
+                };
+                return Task::perform(online::managed(), Message::Discovered);
+            }
+            Message::ToggleFinished(result) => {
+                match result {
+                    Ok((id, enabled)) => {
+                        let ids = self.usable_online.get_or_insert_with(HashSet::new);
+                        if enabled {
+                            ids.insert(id);
+                        } else {
+                            ids.remove(&id);
+                        }
+                        self.status = None;
+                    }
+                    Err(error) => self.status = Some(Status::Error(error)),
+                }
+                return Task::perform(online::managed(), Message::Discovered);
             }
             _ => {}
         }
@@ -334,66 +391,28 @@ impl Accounts {
                 }
                 self.screen = Screen::List;
             }
-            Message::Add => {
-                self.screen = Screen::List;
+            Message::Add | Message::AddLocal => {
+                self.screen = Screen::Edit(Form::new());
+            }
+            Message::AddProvider(provider) => {
                 self.status = Some(Status::Busy);
-                return Task::perform(
-                    async {
-                        accounts::ui::open_add_account()
-                            .map(|()| Outcome::OpenedAccountSettings)
-                            .map_err(|_| Error::OpenAccountSettings)
-                    },
-                    Message::Finished,
-                );
+                return Task::perform(online::begin(provider), Message::AuthStarted);
+            }
+            Message::Reconnect(id) => {
+                self.status = Some(Status::Busy);
+                return Task::perform(online::reconnect(id), Message::AuthStarted);
+            }
+            Message::RemoveOnline(id) => {
+                self.status = Some(Status::Busy);
+                return Task::perform(online::remove(id), Message::RemovedOnline);
             }
             Message::ToggleLink(id, enabled) => {
-                if enabled {
-                    if self.accounts.iter().any(|account| account.id == id) {
-                        return self.show_error(Error::OnlineAlreadyLinked);
-                    }
-                    let Some(account) = self
-                        .available
-                        .iter()
-                        .find(|account| account.id == id)
-                        .cloned()
-                    else {
-                        return Task::none();
-                    };
-                    let store = match &self.store {
-                        Ok(store) => store.clone(),
-                        Err(error) => return self.show_error(*error),
-                    };
-                    self.set_online_usable(id, true);
-                    self.status = Some(Status::Busy);
-                    return Task::perform(
-                        async move {
-                            if account.microsoft_graph {
-                                online::graph_token(id, false).await?;
-                            } else {
-                                online::mail_access(id, false).await?;
-                            }
-                            store.save(account, false, Password::default()).await
-                        },
-                        |result| Message::Finished(result.map(Outcome::Saved)),
-                    );
-                }
-
-                if !self
-                    .accounts
-                    .iter()
-                    .any(|account| account.id == id && account.online)
-                {
-                    return Task::none();
-                }
-                let store = match &self.store {
-                    Ok(store) => store.clone(),
-                    Err(error) => return self.show_error(*error),
-                };
-                self.set_online_usable(id, false);
+                self.set_online_usable(id, enabled);
                 self.status = Some(Status::Busy);
-                return Task::perform(async move { store.remove(id).await }, |result| {
-                    Message::Finished(result.map(Outcome::Disabled))
-                });
+                return Task::perform(
+                    async move { online::set_enabled(id, enabled).await.map(|()| (id, enabled)) },
+                    Message::ToggleFinished,
+                );
             }
             Message::Edit(id) => {
                 if let Some(account) = self
@@ -446,7 +465,7 @@ impl Accounts {
                     Message::Finished(result.map(Outcome::Removed))
                 });
             }
-            Message::Discover | Message::Discovered(_) | Message::Finished(_) => unreachable!(),
+            _ => {}
         }
         Task::none()
     }

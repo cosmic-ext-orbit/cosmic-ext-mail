@@ -56,6 +56,20 @@ pub(super) struct Form {
 }
 
 impl Form {
+    pub(super) fn new() -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            email: String::new(),
+            username: String::new(),
+            imap_host: String::new(),
+            imap_port: "993".into(),
+            smtp_host: String::new(),
+            smtp_port: "587".into(),
+            smtp_starttls: true,
+            password: Password::default(),
+        }
+    }
+
     pub(super) fn edit(account: &Account) -> Self {
         Self {
             id: account.id,
@@ -91,29 +105,20 @@ impl Form {
         if self.password.0.contains(['\r', '\n', '\0']) {
             return Err(Error::Password);
         }
-        let settings = accounts::models::CustomMailSettings {
-            imap_host: host(&self.imap_host).ok_or(Error::ImapSettings)?,
-            imap_port: port(&self.imap_port).ok_or(Error::ImapSettings)?,
-            smtp_host: host(&self.smtp_host).ok_or(Error::SmtpSettings)?,
-            smtp_port: port(&self.smtp_port).ok_or(Error::SmtpSettings)?,
-            smtp_starttls: self.smtp_starttls,
-        };
-        settings.validate().map_err(|field| match field {
-            accounts::models::CustomMailSettingsError::ImapHost
-            | accounts::models::CustomMailSettingsError::ImapPort => Error::ImapSettings,
-            accounts::models::CustomMailSettingsError::SmtpHost
-            | accounts::models::CustomMailSettingsError::SmtpPort => Error::SmtpSettings,
-        })?;
+        let imap_host = host(&self.imap_host).ok_or(Error::ImapSettings)?;
+        let imap_port = port(&self.imap_port).ok_or(Error::ImapSettings)?;
+        let smtp_host = host(&self.smtp_host).ok_or(Error::SmtpSettings)?;
+        let smtp_port = port(&self.smtp_port).ok_or(Error::SmtpSettings)?;
 
         Ok(Account {
             id: self.id,
             email: email.to_owned(),
             username: if username.is_empty() { email } else { username }.to_owned(),
-            imap_host: settings.imap_host,
-            imap_port: settings.imap_port,
-            smtp_host: settings.smtp_host,
-            smtp_port: settings.smtp_port,
-            smtp_starttls: settings.smtp_starttls,
+            imap_host,
+            imap_port,
+            smtp_host,
+            smtp_port,
+            smtp_starttls: self.smtp_starttls,
             online: false,
             microsoft_graph: false,
         })
