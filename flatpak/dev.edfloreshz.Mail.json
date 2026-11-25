@@ -13,10 +13,7 @@
     "--device=dri",
     "--talk-name=com.system76.CosmicSettingsDaemon",
     "--talk-name=com.system76.CosmicSettingsDaemon.*",
-    "--filesystem=xdg-config/cosmic:ro",
-    "--env=ACCOUNTS_GOOGLE_MAIL_CLIENT_ID=905031069686-urv8dmmbk8vvqhi32i8j21458mln9311.apps.googleusercontent.com",
-    "--env=ACCOUNTS_GOOGLE_MAIL_CLIENT_SECRET=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",
-    "--env=ACCOUNTS_MICROSOFT_MAIL_CLIENT_ID=1afb7c90-a913-4e94-9751-557931e582ab"
+    "--filesystem=xdg-config/cosmic:ro"
   ],
   "build-options": {
     "append-path": "/usr/lib/sdk/rust-stable/bin"

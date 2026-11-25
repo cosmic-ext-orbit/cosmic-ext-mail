@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use accounts::{
-    Account as ManagedAccount, Accounts, AuthRequest, Config, Endpoint, Event, ImapSmtpSettings,
+    Account as ManagedAccount, Accounts, AuthRequest, ClientConfig, Config, Endpoint, Event, ImapSmtpSettings,
     MailConnectionSettings, MailCredentials, Provider, Resource, SecretString, Service,
 };
 use cosmic::iced::{Subscription, futures::stream};
@@ -17,7 +17,26 @@ static MANAGER: OnceCell<Accounts> = OnceCell::const_new();
 pub(super) async fn manager() -> Result<&'static Accounts, Error> {
     MANAGER
         .get_or_try_init(|| async {
+            // Public OAuth settings for these installed desktop clients.
             let config = Config::new(APP_ID)
+                .with_client(
+                    Provider::Google,
+                    Service::Mail,
+                    ClientConfig {
+                        client_id: "905031069686-urv8dmmbk8vvqhi32i8j21458mln9311.apps.googleusercontent.com".into(),
+                        client_secret: Some(SecretString::new("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")),
+                        redirect_uri: None,
+                    },
+                )
+                .with_client(
+                    Provider::Microsoft,
+                    Service::Mail,
+                    ClientConfig {
+                        client_id: "1afb7c90-a913-4e94-9751-557931e582ab".into(),
+                        client_secret: None,
+                        redirect_uri: None,
+                    },
+                )
                 .with_client_from_env(Provider::Google, Service::Mail)
                 .with_client_from_env(Provider::Microsoft, Service::Mail)
                 .with_resource_client_from_env(
