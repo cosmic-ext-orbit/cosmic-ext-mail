@@ -1,26 +1,21 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
+use accounts::{ImapSmtpSettings, SecretString};
 use lettre::Address;
-use serde::{Deserialize, Serialize};
 use std::fmt;
 use url::Host;
 use uuid::Uuid;
 
 use super::Error;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
 pub struct Account {
     pub id: Uuid,
     pub email: String,
     pub username: String,
     pub imap_host: String,
     pub imap_port: u16,
-    pub smtp_host: String,
-    pub smtp_port: u16,
-    pub smtp_starttls: bool,
-    #[serde(default)]
     pub online: bool,
-    #[serde(default)]
     pub microsoft_graph: bool,
 }
 
@@ -33,71 +28,33 @@ impl fmt::Debug for Password {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-pub enum Field {
-    Email,
-    Username,
-    ImapHost,
-    ImapPort,
-    SmtpHost,
-    SmtpPort,
+/// Host-side state for the shared Accounts custom mail form.
+#[derive(Clone, Debug, Default)]
+pub struct MailForm {
+    pub email: String,
+    pub username: String,
+    pub imap_host: String,
+    pub imap_port: String,
+    pub smtp_host: String,
+    pub smtp_port: String,
+    pub smtp_starttls: bool,
+    pub password: Password,
 }
 
-pub(super) struct Form {
-    id: Uuid,
-    pub(super) email: String,
-    pub(super) username: String,
-    pub(super) imap_host: String,
-    pub(super) imap_port: String,
-    pub(super) smtp_host: String,
-    pub(super) smtp_port: String,
-    pub(super) smtp_starttls: bool,
-    pub(super) password: Password,
-}
-
-impl Form {
-    pub(super) fn new() -> Self {
+impl MailForm {
+    pub fn new() -> Self {
         Self {
-            id: Uuid::new_v4(),
-            email: String::new(),
-            username: String::new(),
-            imap_host: String::new(),
             imap_port: "993".into(),
-            smtp_host: String::new(),
             smtp_port: "587".into(),
             smtp_starttls: true,
-            password: Password::default(),
+            ..Self::default()
         }
     }
 
-    pub(super) fn edit(account: &Account) -> Self {
-        Self {
-            id: account.id,
-            email: account.email.clone(),
-            username: account.username.clone(),
-            imap_host: account.imap_host.clone(),
-            imap_port: account.imap_port.to_string(),
-            smtp_host: account.smtp_host.clone(),
-            smtp_port: account.smtp_port.to_string(),
-            smtp_starttls: account.smtp_starttls,
-            password: Password::default(),
-        }
-    }
-
-    pub(super) fn change(&mut self, field: Field, value: String) {
-        match field {
-            Field::Email => self.email = value,
-            Field::Username => self.username = value,
-            Field::ImapHost => self.imap_host = value,
-            Field::ImapPort => self.imap_port = value,
-            Field::SmtpHost => self.smtp_host = value,
-            Field::SmtpPort => self.smtp_port = value,
-        }
-    }
-
-    pub(super) fn validate(&self) -> Result<Account, Error> {
+    pub fn validate(&self) -> Result<(ImapSmtpSettings, String, SecretString), Error> {
         let email = self.email.trim();
         email.parse::<Address>().map_err(|_| Error::Email)?;
+
         let username = self.username.trim();
         if username.contains(['\r', '\n', '\0']) {
             return Err(Error::Username);
@@ -105,23 +62,23 @@ impl Form {
         if self.password.0.contains(['\r', '\n', '\0']) {
             return Err(Error::Password);
         }
-        let imap_host = host(&self.imap_host).ok_or(Error::ImapSettings)?;
-        let imap_port = port(&self.imap_port).ok_or(Error::ImapSettings)?;
-        let smtp_host = host(&self.smtp_host).ok_or(Error::SmtpSettings)?;
-        let smtp_port = port(&self.smtp_port).ok_or(Error::SmtpSettings)?;
 
-        Ok(Account {
-            id: self.id,
-            email: email.to_owned(),
-            username: if username.is_empty() { email } else { username }.to_owned(),
-            imap_host,
-            imap_port,
-            smtp_host,
-            smtp_port,
-            smtp_starttls: self.smtp_starttls,
-            online: false,
-            microsoft_graph: false,
-        })
+        Ok((
+            ImapSmtpSettings {
+                imap_host: host(&self.imap_host).ok_or(Error::ImapSettings)?,
+                imap_port: port(&self.imap_port).ok_or(Error::ImapSettings)?,
+                imap_tls: true,
+                smtp_host: host(&self.smtp_host).ok_or(Error::SmtpSettings)?,
+                smtp_port: port(&self.smtp_port).ok_or(Error::SmtpSettings)?,
+                smtp_starttls: self.smtp_starttls,
+            },
+            if username.is_empty() {
+                email.to_owned()
+            } else {
+                username.to_owned()
+            },
+            SecretString::new(self.password.0.clone()),
+        ))
     }
 }
 

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use accounts::{
-    Account as ManagedAccount, Accounts, AuthRequest, Config, Endpoint, Event,
-    MailConnectionSettings, MailCredentials, Provider, Resource, Service,
+    Account as ManagedAccount, Accounts, AuthRequest, Config, Endpoint, Event, ImapSmtpSettings,
+    MailConnectionSettings, MailCredentials, Provider, Resource, SecretString, Service,
 };
 use cosmic::iced::{Subscription, futures::stream};
 use lettre::Address;
@@ -66,9 +66,6 @@ fn convert(account: &ManagedAccount) -> Option<Account> {
             username: email.to_owned(),
             imap_host: String::new(),
             imap_port: 0,
-            smtp_host: String::new(),
-            smtp_port: 0,
-            smtp_starttls: false,
             online: true,
             microsoft_graph: true,
         });
@@ -91,9 +88,6 @@ fn convert(account: &ManagedAccount) -> Option<Account> {
         username: email.to_owned(),
         imap_host: settings.imap_host,
         imap_port: settings.imap_port,
-        smtp_host: settings.smtp_host,
-        smtp_port: settings.smtp_port,
-        smtp_starttls: settings.smtp_starttls,
         online: true,
         microsoft_graph: false,
     })
@@ -143,7 +137,7 @@ pub(crate) async fn graph_token(id: Uuid, refresh: bool) -> Result<Password, Err
 
 pub(super) async fn begin(provider: Provider) -> Result<AuthRequest, Error> {
     let manager = manager().await?;
-    accounts::ui::sign_in(manager, provider, Service::Mail)
+    accounts::ui::begin_sign_in(manager, provider, Service::Mail)
         .await
         .map_err(Error::from)
 }
@@ -156,10 +150,20 @@ pub(super) async fn complete(request: AuthRequest) -> Result<ManagedAccount, Err
         .map_err(Error::from)
 }
 
+pub(super) async fn add_imap_smtp(
+    settings: ImapSmtpSettings,
+    username: String,
+    password: SecretString,
+) -> Result<ManagedAccount, Error> {
+    manager()
+        .await?
+        .add_imap_smtp_account(settings, username, password)
+        .await
+        .map_err(Error::from)
+}
+
 pub(super) async fn reconnect(id: Uuid) -> Result<AuthRequest, Error> {
-    let request = manager().await?.reconnect(id).await?;
-    open::that(&request.url).map_err(|_| Error::OnlineAuthFailed)?;
-    Ok(request)
+    manager().await?.reconnect(id).await.map_err(Error::from)
 }
 
 pub(super) fn cancel(state: &str) {
@@ -215,9 +219,9 @@ pub(super) async fn mail_access(id: Uuid, refresh: bool) -> Result<Authenticatio
     }
     let credentials = manager.mail_access(id).await?;
     Ok(match credentials {
-        MailCredentials::OAuth { settings, token, .. } => {
-            Authentication::OAuth(settings, Password(token.expose().to_owned()))
-        }
+        MailCredentials::OAuth {
+            settings, token, ..
+        } => Authentication::OAuth(settings, Password(token.expose().to_owned())),
         MailCredentials::Password {
             settings,
             username,
