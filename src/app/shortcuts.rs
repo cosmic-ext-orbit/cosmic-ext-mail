@@ -22,7 +22,6 @@ pub enum Action {
     NewMessage,
     Search,
     Refresh,
-    AddAccount,
     CloseWindow,
     Folder(Folder),
     Step(isize),
@@ -68,7 +67,12 @@ static BINDINGS: LazyLock<Vec<Binding>> = LazyLock::new(|| {
         binding(Mail, Search, &[Ctrl], character("f")),
         binding(Mail, Refresh, &[Ctrl], character("r")),
         binding(Mail, Refresh, &[], Key::Named(Named::F5)),
-        binding(Mail, AddAccount, &[Ctrl, Shift], character("a")),
+        binding(
+            Mail,
+            Menu(MenuAction::Open(ContextPage::Accounts)),
+            &[Ctrl, Shift],
+            character("a"),
+        ),
         binding(
             Mail,
             Menu(MenuAction::Open(ContextPage::Settings)),
@@ -137,6 +141,7 @@ static BINDINGS: LazyLock<Vec<Binding>> = LazyLock::new(|| {
 impl Action {
     fn label(self) -> String {
         match self {
+            Self::Menu(MenuAction::Open(ContextPage::Accounts)) => fl!("manage-accounts"),
             Self::Menu(MenuAction::Open(ContextPage::Settings)) => fl!("settings"),
             Self::Menu(MenuAction::Open(ContextPage::About)) => fl!("about"),
             Self::Menu(MenuAction::Open(ContextPage::Shortcuts)) => fl!("keyboard-shortcuts"),
@@ -144,7 +149,6 @@ impl Action {
             Self::NewMessage => fl!("new-message"),
             Self::Search => fl!("search-mail"),
             Self::Refresh => fl!("mail-refresh"),
-            Self::AddAccount => fl!("account-add"),
             Self::CloseWindow | Self::CloseDialog => fl!("shortcut-close"),
             Self::Folder(folder) => folder.label(),
             Self::Step(direction) if direction < 0 => fl!("shortcut-previous-message"),

@@ -30,6 +30,7 @@ enum Pane {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ContextPage {
     Settings,
+    Accounts,
     About,
     Shortcuts,
 }
@@ -217,6 +218,11 @@ impl cosmic::Application for AppModel {
                 &shortcuts::menu_bindings(),
                 vec![
                     menu::Item::Button(
+                        fl!("manage-accounts"),
+                        None,
+                        MenuAction::Open(ContextPage::Accounts),
+                    ),
+                    menu::Item::Button(
                         fl!("settings"),
                         None,
                         MenuAction::Open(ContextPage::Settings),
@@ -254,6 +260,11 @@ impl cosmic::Application for AppModel {
                 context_drawer::context_drawer(self.settings(), Message::CloseContext)
                     .title(fl!("settings"))
             }
+            ContextPage::Accounts => context_drawer::context_drawer(
+                self.accounts.view().map(Message::Accounts),
+                Message::CloseContext,
+            )
+            .title(fl!("accounts")),
             ContextPage::Shortcuts => {
                 context_drawer::context_drawer(shortcuts::view(), Message::CloseContext)
                     .title(fl!("keyboard-shortcuts"))
@@ -824,10 +835,19 @@ impl AppModel {
             preferences = preferences.add(widget::text::body(fl!("settings-error")));
         }
 
+        let accounts = widget::settings::section().title(fl!("accounts")).add(
+            widget::settings::item::builder(fl!("manage-accounts"))
+                .description(fl!("accounts-add-description"))
+                .control(
+                    widget::button::standard(fl!("open"))
+                        .on_press(Message::ToggleContextPage(ContextPage::Accounts)),
+                ),
+        );
+
         widget::column::with_capacity(2)
             .spacing(cosmic::theme::spacing().space_m)
             .push(preferences)
-            .push(self.accounts.view().map(Message::Accounts))
+            .push(accounts)
             .into()
     }
 
@@ -850,7 +870,6 @@ impl AppModel {
             Action::NewMessage => Message::Composer(composer::Message::Open),
             Action::Search => Message::Search(search::Message::Focus),
             Action::Refresh => Message::List(mailbox::Message::Refresh),
-            Action::AddAccount => Message::Accounts(accounts::Message::Add),
             Action::CloseWindow => Message::CloseWindow,
             Action::Folder(folder) => {
                 return self
