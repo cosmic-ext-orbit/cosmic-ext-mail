@@ -84,15 +84,32 @@ vendor-extract:
     rm -rf vendor
     tar pxf vendor.tar
 
-# Bump cargo version, create git commit, and create tag
+# Bump the Cargo package version, commit it, and create an annotated tag.
 tag version:
-    find -type f -name Cargo.toml -exec sed -i '0,/^version/s/^version.*/version = "{{version}}"/' '{}' \; -exec git add '{}' \;
-    cargo check
-    cargo clean
-    git add Cargo.lock
-    git commit -m 'release: {{version}}'
-    git commit --amend
-    git tag -a {{version}} -m ''
+    #!/usr/bin/env bash
+    set -euo pipefail
+    version={{quote(version)}}
+
+    if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+        echo "Expected a Cargo version such as 1.2.3." >&2
+        exit 1
+    fi
+    if git show-ref --verify --quiet "refs/tags/$version"; then
+        echo "Tag $version already exists." >&2
+        exit 1
+    fi
+    if [[ -n "$(git status --porcelain -- Cargo.toml Cargo.lock)" ]]; then
+        echo "Commit or stash pending Cargo.toml and Cargo.lock changes before tagging." >&2
+        exit 1
+    fi
+
+    sed -i "0,/^version = /s/^version = .*/version = \"$version\"/" Cargo.toml
+    if ! cargo update --workspace; then
+        git restore --worktree -- Cargo.toml Cargo.lock
+        exit 1
+    fi
+    git commit --only -m "release: $version" -- Cargo.toml Cargo.lock
+    git tag -a "$version" -m "Release $version"
 
 # Regenerates the Flatpak dependency manifest from Cargo.lock.
 flatpak-cargo-sources:
