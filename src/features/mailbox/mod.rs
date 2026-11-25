@@ -50,7 +50,6 @@ pub struct Mailbox {
     sort_order: SortOrder,
     selected: Option<usize>,
     list_id: widget::Id,
-    // Iced reconciles these buttons by position when filtering or sorting moves messages.
     row_ids: [widget::Id; MESSAGES_PER_PAGE],
     page: usize,
     list_offset: f32,
@@ -894,7 +893,6 @@ mod tests {
         assert!(mailbox.finish_change(&id, false).next.is_none());
         assert!(mailbox.selected().unwrap().flagged);
 
-        // A sync already in flight can predate a confirmed queued change.
         let stale = mailbox.contents.clone();
         assert_eq!(
             mailbox.begin_change(&id, Change::Seen(false)),

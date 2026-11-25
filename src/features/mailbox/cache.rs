@@ -32,7 +32,6 @@ impl Cache {
             .map(PathBuf::from)
             .filter(|path| path.is_absolute())
             .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))?;
-        // Account edits preserve the UUID, so scope cached data to the IMAP identity too.
         let identity = if account.microsoft_graph {
             serde_json::to_vec(&("microsoft-graph", &account.email)).ok()?
         } else {
