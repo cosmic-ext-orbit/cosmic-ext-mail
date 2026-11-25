@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-use accounts::{Provider, Service, provider::providers_for, ui::provider_label};
-use cosmic::iced::Alignment;
+use std::borrow::Cow;
+
+use accounts::{
+    Provider, Service,
+    ui::{Labels, View as AccountsView, provider_label},
+};
 use cosmic::iced::Length;
 use cosmic::{Element, widget};
 use uuid::Uuid;
@@ -9,6 +13,38 @@ use uuid::Uuid;
 use crate::fl;
 
 use super::{Accounts, Field, Form, Message, Password, Screen, Status};
+
+/// Mail keeps its app-local IMAP/SMTP editor, so the embedded panel only
+/// offers browser-based sign-in providers.
+const OAUTH_PROVIDERS: &[Provider] = &[Provider::Google, Provider::Microsoft];
+
+fn waiting_label(provider: Provider) -> String {
+    fl!("accounts-waiting", provider = provider_label(provider))
+}
+
+fn sign_in_label(provider: Provider) -> String {
+    fl!("accounts-sign-in", provider = provider_label(provider))
+}
+
+fn add_provider(provider: Provider) -> Message {
+    Message::AddProvider(provider)
+}
+
+fn cancel_auth(state: &str) -> Message {
+    Message::CancelAuth(state.to_owned())
+}
+
+fn reconnect(id: Uuid) -> Message {
+    Message::Reconnect(id)
+}
+
+fn remove_online(id: Uuid) -> Message {
+    Message::RemoveOnline(id)
+}
+
+fn toggle_link(id: Uuid, enabled: bool) -> Message {
+    Message::ToggleLink(id, enabled)
+}
 
 impl Accounts {
     pub fn view(&self) -> Element<'_, Message> {
@@ -27,81 +63,37 @@ impl Accounts {
     }
 
     fn online(&self) -> Element<'_, Message> {
-        let mut section = widget::settings::section().title(fl!("online-accounts"));
-        let editable = !self.is_busy() && self.auth().is_none();
+        let error: Option<Cow<'_, str>> = self.discovery_error.map(|error| error.text().into());
+        let labels = Labels {
+            title: fl!("online-accounts").into(),
+            empty: fl!("account-empty").into(),
+            waiting: &waiting_label,
+            waiting_description: fl!("accounts-waiting-description").into(),
+            cancel: fl!("account-cancel").into(),
+            reconnect: fl!("accounts-reconnect").into(),
+            remove: fl!("accounts-remove").into(),
+            add: fl!("account-add").into(),
+            add_description: fl!("accounts-add-description").into(),
+            sign_in: &sign_in_label,
+            ..Labels::default()
+        };
 
-        if let Some(error) = self.discovery_error {
-            section = section.add(widget::text::body(error.text()));
-        } else if self.managed.is_empty() && self.auth().is_none() && !self.discovering {
-            section = section.add(widget::text::body(fl!("account-empty")));
-        }
-
-        if let Some(request) = self.auth() {
-            let state = request.state.clone();
-            section = section.add(
-                widget::settings::item::builder(fl!(
-                    "accounts-waiting",
-                    provider = provider_label(request.provider)
-                ))
-                .description(fl!("accounts-waiting-description"))
-                .control(
-                    widget::button::standard(fl!("account-cancel"))
-                        .on_press(Message::CancelAuth(state)),
-                ),
-            );
-        }
-
-        for account in &self.managed {
-            let id = account.id;
-            let enabled = self
-                .usable_online
-                .as_ref()
-                .map_or(account.enabled, |ids| ids.contains(&id));
-            let controls = widget::row::with_capacity(3)
-                .spacing(cosmic::theme::spacing().space_xs)
-                .align_y(Alignment::Center)
-                .push(
-                    widget::button::standard(fl!("accounts-reconnect"))
-                        .on_press_maybe(editable.then_some(Message::Reconnect(id))),
-                )
-                .push(
-                    widget::button::destructive(fl!("accounts-remove"))
-                        .on_press_maybe(editable.then_some(Message::RemoveOnline(id))),
-                )
-                .push(
-                    widget::toggler(enabled)
-                        .on_toggle_maybe(editable.then_some(move |enabled| {
-                            Message::ToggleLink(id, enabled)
-                        })),
-                );
-            section = section.add(
-                widget::settings::item::builder(account.email_or_identity())
-                    .description(provider_label(account.provider))
-                    .control(controls),
-            );
-        }
-
-        let mut providers = widget::row::with_capacity(2)
-            .spacing(cosmic::theme::spacing().space_xs);
-        for provider in providers_for(Service::Mail)
-            .into_iter()
-            .filter(|provider| matches!(provider, Provider::Google | Provider::Microsoft))
-        {
-            providers = providers.push(
-                widget::button::standard(fl!(
-                    "accounts-sign-in",
-                    provider = provider_label(provider)
-                ))
-                .on_press_maybe(editable.then_some(Message::AddProvider(provider))),
-            );
-        }
-        section = section.add(
-            widget::settings::item::builder(fl!("account-add"))
-                .description(fl!("accounts-add-description"))
-                .control(providers),
-        );
-
-        section.add(self.status_text()).into()
+        widget::column::with_capacity(2)
+            .push(accounts::ui::view(AccountsView {
+                service: Service::Mail,
+                accounts: &self.managed,
+                pending: self.auth(),
+                error,
+                providers: Some(OAUTH_PROVIDERS),
+                labels,
+                on_add: &add_provider,
+                on_cancel: &cancel_auth,
+                on_remove: &remove_online,
+                on_reconnect: &reconnect,
+                on_toggle: &toggle_link,
+            }))
+            .push(self.status_text())
+            .into()
     }
 
     fn local(&self) -> Element<'_, Message> {
