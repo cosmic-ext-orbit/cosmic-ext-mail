@@ -15,5 +15,10 @@ fn main() -> cosmic::iced::Result {
     let settings = cosmic::app::Settings::default()
         .exit_on_close(false)
         .no_main_window(true);
-    cosmic::app::run_single_instance::<app::AppModel>(settings, app::Flags)
+    #[cfg(target_os = "linux")]
+    let run = cosmic::app::run_single_instance::<app::AppModel>;
+    #[cfg(not(target_os = "linux"))]
+    let run = cosmic::app::run::<app::AppModel>;
+
+    run(settings, app::Flags)
 }

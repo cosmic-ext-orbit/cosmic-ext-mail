@@ -728,6 +728,7 @@ impl cosmic::Application for AppModel {
             .then_some(Message::WindowClosed(id))
     }
 
+    #[cfg(target_os = "linux")]
     fn dbus_activation(&mut self, message: cosmic::dbus_activation::Message) -> Task<Message> {
         if let cosmic::dbus_activation::Details::ActivateAction { action, .. } = message.msg
             && action == "quit"
@@ -1231,6 +1232,7 @@ impl AppModel {
             decorations: false,
             transparent: true,
             exit_on_close_request: false,
+            #[cfg(target_os = "linux")]
             platform_specific: window::settings::PlatformSpecific {
                 application_id: Self::APP_ID.to_owned(),
                 ..Default::default()
